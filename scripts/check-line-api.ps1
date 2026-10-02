@@ -4,9 +4,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$apiUrl = "$($BaseUrl.TrimEnd('/'))/api/integrations/line/orders"
+$baseUrlClean = $BaseUrl.TrimEnd("/")
+$apiUrl = $baseUrlClean + "/api/integrations/line/orders"
 
-Write-Host "ตรวจสอบ: $apiUrl" -ForegroundColor Cyan
+Write-Host ("ตรวจสอบ: " + $apiUrl) -ForegroundColor Cyan
 
 $headers = @{}
 if ($AdminToken) {
@@ -23,7 +24,7 @@ try {
     -Headers $headers `
     -UseBasicParsing
 
-  Write-Host "HTTP Status: $($response.StatusCode)" -ForegroundColor Green
+  Write-Host ("HTTP Status: " + $response.StatusCode) -ForegroundColor Green
   Write-Host "Response:" -ForegroundColor Yellow
   $response.Content
 
@@ -35,7 +36,7 @@ catch {
   $webResponse = $_.Exception.Response
   if ($webResponse) {
     $statusCode = [int]$webResponse.StatusCode
-    Write-Host "HTTP Status: $statusCode" -ForegroundColor Red
+    Write-Host ("HTTP Status: " + $statusCode) -ForegroundColor Red
     $reader = New-Object System.IO.StreamReader($webResponse.GetResponseStream())
     $body = $reader.ReadToEnd()
     $reader.Dispose()
@@ -49,18 +50,19 @@ catch {
       default { Write-Host "สรุป: ตรวจรายละเอียด Response ด้านบน" -ForegroundColor Yellow }
     }
   } else {
-    Write-Host "เชื่อมต่อไม่สำเร็จ: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ("เชื่อมต่อไม่สำเร็จ: " + $_.Exception.Message) -ForegroundColor Red
   }
 }
 
 Write-Host "`nตรวจ source production เพิ่มเติม..." -ForegroundColor Cyan
 try {
-  $html = (Invoke-WebRequest -Uri "$($BaseUrl.TrimEnd('/'))/?check=line-api" -UseBasicParsing).Content
+  $pageUrl = $baseUrlClean + "/?check=line-api"
+  $html = (Invoke-WebRequest -Uri $pageUrl -UseBasicParsing).Content
   if ($html -match "LINE OA") {
     Write-Host "พบเมนู LINE OA ใน production" -ForegroundColor Green
   } else {
     Write-Host "ไม่พบเมนู LINE OA: production ยังเป็น build เก่า" -ForegroundColor Red
   }
 } catch {
-  Write-Host "อ่านหน้าเว็บ production ไม่สำเร็จ: $($_.Exception.Message)" -ForegroundColor Yellow
+  Write-Host ("อ่านหน้าเว็บ production ไม่สำเร็จ: " + $_.Exception.Message) -ForegroundColor Yellow
 }
