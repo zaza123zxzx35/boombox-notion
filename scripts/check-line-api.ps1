@@ -11,7 +11,7 @@ Write-Host ("Checking API: " + $apiUrl) -ForegroundColor Cyan
 
 $headers = @{}
 if ($AdminToken) {
-  $headers["X-Admin-Token"] = $AdminToken
+  $headers["Authorization"] = "Bearer " + $AdminToken.Trim()
   Write-Host "Mode: checking with admin token" -ForegroundColor DarkGray
 } else {
   Write-Host "Mode: checking route without token" -ForegroundColor DarkGray
