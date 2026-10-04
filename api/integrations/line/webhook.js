@@ -28,7 +28,7 @@ async function supabase(path, options = {}) {
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
-    signal: options.signal || AbortSignal.timeout(500),
+    signal: options.signal || AbortSignal.timeout(2500),
   });
   const text = await response.text();
   let body = null;
