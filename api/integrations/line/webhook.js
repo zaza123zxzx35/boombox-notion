@@ -7,6 +7,48 @@ export const config = {
 
 const crypto = require("crypto");
 
+// ====== Phase 10: Catalog Canonical (copy orders.js SOI verbatim) ======
+const PACKAGES = {
+  A: { name: "เริ่มต้น", price: 299, boxes: 1 },
+  B: { name: "คุ้มค่า", price: 389, boxes: 2 },
+  C: { name: "จัดเต็ม", price: 499, boxes: 4 },
+  D: { name: "VIP", price: 649, boxes: 6 },
+};
+const PACKAGE_BEADS = { A: 100, B: 200, C: 400, D: 600 };
+const FLAVORS = new Set([
+  "สตรอว์เบอร์รี", "องุ่น", "แอปเปิล", "แตงโม", "พีช", "มะม่วง", "ลิ้นจี่",
+  "บลูเบอร์รี", "เชอร์รี", "สับปะรด", "เลมอน", "ส้ม", "มะพร้าว", "กล้วย",
+  "กีวี", "มิ้นท์เย็น", "สเปียร์มิ้นท์", "เปปเปอร์มิ้นท์", "เมนทอล",
+]);
+const FLAVOR_LIST = Array.from(FLAVORS);
+const ALLOWED_STATES = new Set([
+  "new", "collecting_package", "collecting_color", "collecting_scents",
+  "collecting_customer", "awaiting_confirmation", "confirmed", "cancelled",
+]);
+const CONFIRM_WHITELIST = new Set([
+  "ยืนยันออเดอร์", "ยืนยัน", "ตกลง สั่งตามนี้",
+]);
+const AMBIGUOUS_SAFE = new Set([
+  "ครับ","คับ","โอเคมั้ง","โอเค","เค","น่าจะได้","น่าจะ","ได้เลย","ได้ไหม","ได้","เยี่ยม","สั่งเลย","สั่ง","ตกลง","ok","okay","yes","จ้ะ","จ้า","ยืนยันนะ"
+]);
+const CANCEL_KEYWORD = "ยกเลิก";
+const EDIT_KEYWORD = "แก้ไข";
+const RESTART_KEYWORD = "เริ่มใหม่";
+const DEFAULT_SHIPPING_FEE = 0;
+const EDIT_FIELDS = ["แพ็กเกจ","สี","กลิ่น","ชื่อ","เบอร์","ที่อยู่"];
+const EDIT_FIELD_STATE = {
+  1: "collecting_package", 2: "collecting_color", 3: "collecting_scents",
+  4: "collecting_customer", 5: "collecting_customer", 6: "collecting_customer",
+};
+const EDIT_FIELD_KEY_IN_DRAFT = {
+  1: ["package","scents"],
+  2: ["deviceColor"],
+  3: ["scents"],
+  4: ["customer.name","customer.displayName"],
+  5: ["customer.phone"],
+  6: ["customer.shippingAddress","customer.address"],
+};
+
 function json(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8").send(JSON.stringify(body));
 }
@@ -91,7 +133,7 @@ function buildWebhookEventId(destination, eventIndex, ev) {
 function buildStaticReply(ev) {
   switch (ev?.type) {
     case "follow":
-      return "สวัสดีครับ ยินดีต้อนรับ BOOMBOX TH ครับ 🙏 สนใจ Set A (299฿) B (389฿) C (499฿) D (649฿) ครับ";
+      return "สวัสดีครับ ยินดีต้อนรับ BOOMBOX TH ครับ 🙏 สนใจ Set A (299฿) B (389฿) C (499฿) D (649฿) ครับ — พิมพ์ A/B/C/D หรือ ราคาเท่าไหร่ เพื่อเริ่มต้นครับ";
     case "message": {
       const t = ev.message?.type;
       if (t === "text") return "ขอบคุณครับ ระบบกำลังปรับปรุง AI สามารถสอบถามรายละเอียดเพิ่มเติมได้เลยครับ";
@@ -115,7 +157,7 @@ async function callLineReply(accessToken, replyToken, text) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
+      body: JSON.stringify({ replyToken, messages: [{ type: "text", text: text.slice(0, 5000) }] }),
       signal: controller.signal,
     });
     const short = await res.text().then((t) => String(t).slice(0, 500)).catch(() => "");
@@ -130,12 +172,547 @@ async function callLineReply(accessToken, replyToken, text) {
   }
 }
 
+async function callOrdersAPI(orderToken, host, payload) {
+  if (!orderToken) return { ok: false, error: "Missing LINE_ORDER_API_TOKEN" };
+  try {
+    const res = await fetch(`https://${host}/api/integrations/line/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${orderToken}`,
+        "X-Line-Webhook-Secret": orderToken,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(4000),
+    });
+    const short = await res.text().then((t) => String(t).slice(0, 800)).catch(() => "");
+    let body = null;
+    try { body = short ? JSON.parse(short) : null; } catch { body = { raw: short }; }
+    const ok = res.ok || (body && body.success === true && body.duplicate === true);
+    return { ok, status: res.status, body };
+  } catch (err) {
+    const name = err?.name || String(err).slice(0, 80);
+    return { ok: false, error: name };
+  }
+}
+
 async function updateEventRow(eventRowId, patch) {
   if (!eventRowId) return;
   await supabase(`line_webhook_events?id=eq.${encodeURIComponent(eventRowId)}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+async function patchConversation(convoRowId, patch) {
+  if (!convoRowId) return;
+  await supabase(`line_conversations?id=eq.${encodeURIComponent(convoRowId)}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      ...patch,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+}
+
+function normalizeText(s) {
+  if (typeof s !== "string") return "";
+  return s
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeConfirm(s) {
+  return normalizeText(s).toLowerCase().replace(/\s+/g, " ");
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length < 7) return (phone || "").slice(0, 3) + "***";
+  return digits.slice(0, 3) + "***" + digits.slice(-4);
+}
+
+function maskAddress(addr) {
+  const s = String(addr || "");
+  if (s.length <= 20) return s;
+  return s.slice(0, 20) + "...";
+}
+
+function maskName(name) {
+  const s = String(name || "");
+  if (!s) return "";
+  if (s.length <= 3) return s;
+  return s.slice(0, 3) + "***";
+}
+
+function isThaiPhone(s) {
+  const d = String(s || "").replace(/\D/g, "");
+  return /^(08|09|06)\d{8}$/.test(d) && d.length === 10;
+}
+
+function extractThaiPhone(s) {
+  const d = String(s || "").replace(/\D/g, "");
+  const m = d.match(/(08|09|06)\d{8}/);
+  if (m) return m[0];
+  if (isThaiPhone(d)) return d;
+  return null;
+}
+
+function parsePackageLetter(s) {
+  const n = normalizeText(s).toUpperCase();
+  const m = n.match(/\b([ABCD])\b/);
+  if (m && PACKAGES[m[1]]) return m[1];
+  const m2 = n.match(/(?:SET|ชุด|เซ็ต|CHUT)\s*([ABCD])/);
+  if (m2 && PACKAGES[m2[1]]) return m2[1];
+  return null;
+}
+
+function scentCountNeeded(code) {
+  if (code === "A") return 0;
+  return PACKAGES[code]?.boxes ?? 0;
+}
+
+function parseEditChoice(s) {
+  const n = normalizeText(s);
+  const m = n.match(/^([1-6])/);
+  if (m) return parseInt(m[1], 10);
+  for (let i = 0; i < EDIT_FIELDS.length; i++) {
+    if (n.includes(EDIT_FIELDS[i])) return i + 1;
+  }
+  return null;
+}
+
+function clearDraftFields(draft, choice) {
+  const keys = EDIT_FIELD_KEY_IN_DRAFT[choice] || [];
+  const next = JSON.parse(JSON.stringify(draft || {}));
+  keys.forEach((p) => {
+    const parts = p.split(".");
+    if (parts.length === 1) {
+      if (parts[0] === "package") {
+        next.package = { code: null, name: null, price: null };
+      } else if (parts[0] === "scents") {
+        next.scents = [];
+      } else if (parts[0] === "deviceColor") {
+        next.deviceColor = null;
+      } else {
+        next[parts[0]] = null;
+      }
+    } else if (parts.length === 2) {
+      next[parts[0]] = next[parts[0]] || {};
+      next[parts[0]][parts[1]] = null;
+    }
+  });
+  if (choice === 1) next.scents = [];
+  return next;
+}
+
+function customerMissingFields(draft) {
+  const c = draft?.customer || {};
+  const name = String(c.displayName || c.name || "").trim();
+  const phone = String(c.phone || "").trim();
+  const addr = String(c.shippingAddress || c.address || "").trim();
+  const missing = [];
+  if (!name) missing.push("name");
+  if (!isThaiPhone(phone)) missing.push("phone");
+  if (!addr) missing.push("address");
+  return missing;
+}
+
+function draftComplete(draft) {
+  const code = draft?.package?.code;
+  if (!PACKAGES[code]) return false;
+  if (code !== "A" && (!Array.isArray(draft?.scents) || draft.scents.length !== scentCountNeeded(code))) return false;
+  if (code === "A" && Array.isArray(draft?.scents) && draft.scents.length !== 0) return false;
+  if (!String(draft?.deviceColor || "").trim()) return false;
+  return customerMissingFields(draft).length === 0;
+}
+
+function buildAwaitingSummary(draft) {
+  const code = draft.package.code;
+  const pkg = PACKAGES[code];
+  const beads = PACKAGE_BEADS[code];
+  const price = pkg.price;
+  const color = draft.deviceColor;
+  const scents = code === "A" ? [] : (draft.scents || []);
+  const scentsText = code === "A" ? "(ไม่ต้องเลือกกลิ่น)" : scents.join(", ");
+  const cust = draft.customer || {};
+  const name = cust.displayName || cust.name || "-";
+  const phone = cust.phone || "-";
+  const addr = cust.shippingAddress || cust.address || "-";
+  const shipping = Number(draft.shippingFee ?? DEFAULT_SHIPPING_FEE);
+  const total = price + shipping;
+  const lines = [
+    `📦 สรุปรายการสั่งซื้อ`,
+    `Set: ${code} (${pkg.name})`,
+    `จำนวนเม็ด: ${beads} เม็ด`,
+    `ราคาแพ็กเกจ: ฿${price}`,
+    `สีเครื่อง: ${color || "-"}`,
+    `กลิ่น (${scents.length}/${scentCountNeeded(code)}): ${scentsText}`,
+    `ชื่อผู้รับ: ${name}`,
+    `เบอร์โทร: ${maskPhone(phone)}`,
+    `ที่อยู่จัดส่ง: ${maskAddress(addr)}`,
+    `ค่าส่ง: ฿${shipping}`,
+    `ยอดรวมทั้งสิ้น: ฿${total}`,
+    ``,
+    `กรุณาพิมพ์ ยืนยันออเดอร์ เพื่อส่งคำสั่งซื้อ หรือพิมพ์ แก้ไข / ยกเลิก`,
+  ];
+  return lines.join("\n");
+}
+
+function catalogPriceTable() {
+  return [
+    `🌈 ราคาตาม Catalog:`,
+    `  Set A: 100 เม็ด ราคา ฿299 (ไม่ต้องเลือกกลิ่น)`,
+    `  Set B: 200 เม็ด ราคา ฿389 (เลือก 2 กลิ่น)`,
+    `  Set C: 400 เม็ด ราคา ฿499 (เลือก 4 กลิ่น)`,
+    `  Set D: 600 เม็ด ราคา ฿649 (เลือก 6 กลิ่น)`,
+    `🌸 รายการกลิ่นมาตรฐาน 19 รายการ:`,
+    `  ${FLAVOR_LIST.join(" / ")}`,
+    ``,
+    `พิมพ์ A / B / C / D เพื่อเริ่มเลือกชุดครับ`,
+  ].join("\n");
+}
+
+function helpChooseScent(code) {
+  const need = scentCountNeeded(code);
+  return [
+    `กรุณาเลือกกลิ่นทีละ 1 รายการต่อข้อความครับ`,
+    `🌸 รายการกลิ่น 19 รายการ:`,
+    FLAVOR_LIST.join(", "),
+    ``,
+    `จำเป็นต้องเลือกทั้งหมด ${need} กลิ่น (ห้ามซ้ำ ห้ามเลือกนอกรายการ)`,
+  ].join("\n");
+}
+
+function collectCustomerPrompt(draft) {
+  const miss = customerMissingFields(draft);
+  if (miss.length === 0) return null;
+  const m = miss[0];
+  if (m === "name") return "กรุณากรอกชื่อผู้รับครับ (ชื่อ-นามสกุล)";
+  if (m === "phone") return "กรุณากรอกเบอร์มือถือ (10 หลัก เช่น 0891234567) ครับ";
+  return "กรุณากรอกที่อยู่จัดส่งครับ (บ้านเลขที่/หมู่บ้าน/ซอย/ถนน/ตำบล/อำเภอ/จังหวัด/รหัสไปรษณีย์)";
+}
+
+function parseCustomerFieldsInto(draft, text) {
+  const next = JSON.parse(JSON.stringify(draft || {}));
+  next.customer = next.customer || {};
+  const name = String(next.customer.displayName || next.customer.name || "").trim();
+  const phone = String(next.customer.phone || "").trim();
+  const addr = String(next.customer.shippingAddress || next.customer.address || "").trim();
+  const phoneFound = extractThaiPhone(text);
+  const withoutPhone = phoneFound ? text.replace(phoneFound, " ") : text;
+  const tokensSplit = withoutPhone.split(/[,，;；\n\r\t]+/).map((x) => x.trim()).filter(Boolean);
+  const ADDR_MARKERS = ["หมู่","หมู่บ้าน","ซอย","ถนน","ตำบล","แขวง","อำเภอ","เขต","จังหวัด","กรุงเทพ","รหัสไปรษณีย์","บ้านเลขที่","ซอย","ถนน"];
+  let chunks = [];
+  function smartSplitIntoChunks(blob) {
+    const out = [];
+    const spaceSplit = normalizeText(blob).split(/\s+/).filter(Boolean);
+    if (spaceSplit.length === 0) return out;
+    if (spaceSplit.length === 1) { out.push(spaceSplit[0]); return out; }
+    let splitIdx = -1;
+    for (let i = 1; i < spaceSplit.length; i++) {
+      const t = spaceSplit[i];
+      if (/\d/.test(t) && t.length >= 2) { splitIdx = i; break; }
+      if (ADDR_MARKERS.some((m) => t.includes(m))) { splitIdx = i; break; }
+    }
+    if (splitIdx <= 0) splitIdx = Math.min(2, spaceSplit.length - 1);
+    const firstPiece = spaceSplit.slice(0, splitIdx).join(" ");
+    const addrPiece = spaceSplit.slice(splitIdx).join(" ");
+    if (firstPiece) out.push(firstPiece);
+    if (addrPiece) out.push(addrPiece);
+    return out;
+  }
+  if (tokensSplit.length >= 2) {
+    chunks = tokensSplit;
+  } else if (tokensSplit.length === 1) {
+    const one = tokensSplit[0];
+    const spacePieces = normalizeText(one).split(/\s+/).filter(Boolean);
+    if (spacePieces.length <= 1) chunks = [one];
+    else chunks = smartSplitIntoChunks(one);
+  } else {
+    chunks = smartSplitIntoChunks(withoutPhone);
+  }
+  if (phoneFound && !isThaiPhone(phone)) next.customer.phone = phoneFound;
+  if (!name) {
+    const candidateName = (chunks[0] || "").trim();
+    if (candidateName && candidateName.length >= 2 && candidateName.length <= 80) {
+      next.customer.displayName = candidateName;
+      next.customer.name = candidateName;
+      chunks.shift();
+    }
+  }
+  if (!addr) {
+    const leftover = chunks.join(" ").trim();
+    if (leftover && leftover.length >= 5 && leftover.length <= 400) {
+      next.customer.shippingAddress = leftover;
+      next.customer.address = leftover;
+    }
+  }
+  return next;
+}
+
+function reduceConversation(state, draft, rawText, context) {
+  const next = JSON.parse(JSON.stringify(draft || {}));
+  next.customer = next.customer || {};
+  next.package = next.package || { code: null, name: null, price: null };
+  next.scents = Array.isArray(next.scents) ? next.scents.slice() : [];
+  const text = normalizeText(rawText);
+  const textLower = text.toLowerCase();
+  const confirmedNormalized = normalizeConfirm(text);
+
+  if (state === "cancelled") {
+    if (text === RESTART_KEYWORD || text.includes(RESTART_KEYWORD)) {
+      const fresh = { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE, editing: null };
+      return {
+        nextState: "new",
+        nextDraft: fresh,
+        replyText: "เริ่มการสนทนาใหม่ครับ 🙏 กรุณาเลือก Set A/B/C/D หรือพิมพ์ ราคาเท่าไหร่ เพื่อดูราคา",
+        summaryShown: false,
+      };
+    }
+    return {
+      nextState: "cancelled",
+      nextDraft: next,
+      replyText: "รายการนี้ยกเลิกแล้วครับ หากต้องการสั่งซื้อใหม่ กรุณาพิมพ์ เริ่มใหม่ ครับ",
+      summaryShown: false,
+    };
+  }
+
+  if (text === CANCEL_KEYWORD || text.includes(CANCEL_KEYWORD)) {
+    return {
+      nextState: "cancelled",
+      nextDraft: { ...next, package: next.package, scents: next.scents, deviceColor: next.deviceColor, customer: next.customer },
+      replyText: "ยกเลิกรายการเรียบร้อยครับ หากต้องการสั่งซื้อใหม่ภายหลัง พิมพ์ เริ่มใหม่ ครับ",
+      summaryShown: false,
+    };
+  }
+
+  if (state === "awaiting_confirmation") {
+    if (CONFIRM_WHITELIST.has(text) || CONFIRM_WHITELIST.has(confirmedNormalized) || CONFIRM_WHITELIST.has(text.replace(/\s+/g, ""))) {
+      return { nextState: "__CONFIRM_TRIGGERED__", nextDraft: next, replyText: null, summaryShown: false, confirmTriggered: true };
+    }
+    if (AMBIGUOUS_SAFE.has(textLower.replace(/\s+/g, "")) || AMBIGUOUS_SAFE.has(textLower)) {
+      return {
+        nextState: "awaiting_confirmation",
+        nextDraft: next,
+        replyText: "ขออภัยครับ ยังไม่เข้าใจ กรุณายืนยันอย่างชัดเจนด้วยการพิมพ์:\n\nยืนยันออเดอร์\n\nหรือพิมพ์ แก้ไข / ยกเลิก ครับ",
+        summaryShown: true,
+        confirmPrompt: true,
+      };
+    }
+    if (text === EDIT_KEYWORD || text.includes(EDIT_KEYWORD)) {
+      next.editing = "awaiting_choice";
+      return {
+        nextState: "awaiting_confirmation",
+        nextDraft: next,
+        replyText: [
+          "เลือกข้อมูลที่ต้องการแก้ไขตามตัวเลขครับ:",
+          "1. แพ็กเกจ",
+          "2. สีเครื่อง",
+          "3. กลิ่น",
+          "4. ชื่อผู้รับ",
+          "5. เบอร์โทร",
+          "6. ที่อยู่",
+        ].join("\n"),
+        summaryShown: true,
+      };
+    }
+    const choice = parseEditChoice(text);
+    if (next.editing === "awaiting_choice" && choice) {
+      const target = EDIT_FIELD_STATE[choice];
+      const cleared = clearDraftFields(next, choice);
+      cleared.editing = null;
+      let replyText = "";
+      if (choice === 1) replyText = "กรุณาเลือกแพ็กเกจใหม่ A / B / C / D ครับ";
+      else if (choice === 2) replyText = "กรุณากรอกสีเครื่องใหม่ครับ (2-60 ตัวอักษร)";
+      else if (choice === 3) replyText = helpChooseScent(cleared.package.code || next.package.code || "B");
+      else if (choice === 4) replyText = "กรุณากรอกชื่อผู้รับใหม่ครับ";
+      else if (choice === 5) replyText = "กรุณากรอกเบอร์มือถือ 10 หลักใหม่ครับ";
+      else replyText = "กรุณากรอกที่อยู่จัดส่งใหม่ครับ";
+      return { nextState: target, nextDraft: cleared, replyText, summaryShown: false };
+    }
+    return {
+      nextState: "awaiting_confirmation",
+      nextDraft: next,
+      replyText: buildAwaitingSummary(next),
+      summaryShown: true,
+    };
+  }
+
+  if (state === "new") {
+    if (textLower === "ราคาเท่าไหร่" || textLower.includes("ราคาเท่าไหร่") || textLower === "ราคา" || text === "ราคา") {
+      return { nextState: "new", nextDraft: next, replyText: catalogPriceTable(), summaryShown: false };
+    }
+    const letter = parsePackageLetter(text);
+    if (letter) {
+      next.package = { code: letter, name: PACKAGES[letter].name, price: PACKAGES[letter].price };
+      next.scents = [];
+      return {
+        nextState: "collecting_color",
+        nextDraft: next,
+        replyText: `เลือก Set ${letter} (${PACKAGES[letter].name}) ${PACKAGE_BEADS[letter]} เม็ด ราคา ฿${PACKAGES[letter].price} เรียบร้อยครับ\n\nกรุณากรอกสีเครื่องครับ (เช่น ขาว, ดำ, ชมพู)`,
+        summaryShown: false,
+      };
+    }
+    if (text === "สวัสดี" || textLower.includes("สวัสดี") || textLower === "หวัดดี" || textLower === "hello" || textLower === "hi") {
+      return {
+        nextState: "new",
+        nextDraft: next,
+        replyText: "สวัสดีครับ ยินดีต้อนรับ BOOMBOX TH 🙏\n\nกรุณาเลือก Set ด้วยการพิมพ์ A / B / C / D หรือพิมพ์ ราคาเท่าไหร่ เพื่อดูรายการราคาและกลิ่นครับ",
+        summaryShown: false,
+      };
+    }
+    return {
+      nextState: "new",
+      nextDraft: next,
+      replyText: "ยินดีต้อนรับครับ 🙏 กรุณาเลือกชุดด้วยการพิมพ์ A / B / C / D หรือพิมพ์ ราคาเท่าไหร่ เพื่อดูรายการครับ",
+      summaryShown: false,
+    };
+  }
+
+  if (state === "collecting_package") {
+    if (textLower === "ราคาเท่าไหร่" || textLower.includes("ราคาเท่าไหร่")) {
+      return { nextState: "collecting_package", nextDraft: next, replyText: catalogPriceTable(), summaryShown: false };
+    }
+    const letter = parsePackageLetter(text);
+    if (letter) {
+      next.package = { code: letter, name: PACKAGES[letter].name, price: PACKAGES[letter].price };
+      next.scents = [];
+      return {
+        nextState: "collecting_color",
+        nextDraft: next,
+        replyText: `เลือก Set ${letter} (${PACKAGES[letter].name}) ${PACKAGE_BEADS[letter]} เม็ด ราคา ฿${PACKAGES[letter].price} เรียบร้อยครับ\n\nกรุณากรอกสีเครื่องครับ`,
+        summaryShown: false,
+      };
+    }
+    return {
+      nextState: "collecting_package",
+      nextDraft: next,
+      replyText: "กรุณาเลือกแพ็กเกจด้วยการพิมพ์ A / B / C / D หรือพิมพ์ ราคาเท่าไหร่ เพื่อดูรายการครับ",
+      summaryShown: false,
+    };
+  }
+
+  if (state === "collecting_color") {
+    const color = text;
+    if (color.length >= 2 && color.length <= 60) {
+      next.deviceColor = color;
+      const code = next.package.code;
+      if (code === "A") {
+        next.scents = [];
+        return {
+          nextState: "collecting_customer",
+          nextDraft: next,
+          replyText: `สีเครื่อง ${color} เรียบร้อยครับ (Set A ไม่ต้องเลือกกลิ่น)\n\nกรุณากรอกชื่อผู้รับครับ`,
+          summaryShown: false,
+        };
+      }
+      const need = scentCountNeeded(code);
+      return {
+        nextState: "collecting_scents",
+        nextDraft: next,
+        replyText: `สีเครื่อง ${color} เรียบร้อยครับ\n\n${helpChooseScent(code)}\n\nตอนนี้เลือกได้ ${next.scents.length}/${need} กลิ่นครับ — พิมพ์ชื่อกลิ่นรายการแรกครับ`,
+        summaryShown: false,
+      };
+    }
+    return {
+      nextState: "collecting_color",
+      nextDraft: next,
+      replyText: "กรุณากรอกสีเครื่อง (2-60 ตัวอักษร) เช่น ขาว, ดำ, ชมพู ครับ",
+      summaryShown: false,
+    };
+  }
+
+  if (state === "collecting_scents") {
+    const code = next.package.code;
+    const need = scentCountNeeded(code);
+    const names = text.split(/[,，;；\n\r]+/).map((s) => normalizeText(s)).filter(Boolean);
+    let addCount = 0;
+    let invalidName = null;
+    let dupName = null;
+    for (const n of names) {
+      if (!FLAVORS.has(n)) { invalidName = n; break; }
+      if (next.scents.includes(n)) { dupName = n; break; }
+      if (next.scents.length + 1 > need) { break; }
+      next.scents.push(n);
+      addCount++;
+    }
+    if (invalidName) {
+      return {
+        nextState: "collecting_scents",
+        nextDraft: next,
+        replyText: `❌ ไม่มีกลิ่น "${invalidName}" ในรายการมาตรฐาน 19 รายการครับ\n\n${helpChooseScent(code)}\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นครับ`,
+        summaryShown: false,
+      };
+    }
+    if (dupName) {
+      return {
+        nextState: "collecting_scents",
+        nextDraft: next,
+        replyText: `❌ กลิ่น "${dupName}" ซ้ำครับ กรุณาเลือกกลิ่นใหม่ที่ยังไม่เคยเลือก\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นที่เลือกไว้: ${next.scents.join(", ")}`,
+        summaryShown: false,
+      };
+    }
+    if (next.scents.length > need || (addCount === 0 && names.length && next.scents.length === need)) {
+      return {
+        nextState: "collecting_scents",
+        nextDraft: next,
+        replyText: `❌ เลือกกลิ่นเกินจำนวนที่ต้องการ (ต้องการ ${need} กลิ่น) ครับ\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นที่เลือกไว้: ${next.scents.join(", ")}`,
+        summaryShown: false,
+      };
+    }
+    if (next.scents.length < need) {
+      return {
+        nextState: "collecting_scents",
+        nextDraft: next,
+        replyText: `✅ เพิ่มกลิ่น ${addCount} รายการเรียบร้อย\nตอนนี้ ${next.scents.length}/${need} กลิ่นที่เลือกไว้: ${next.scents.join(", ")}\n\nกรุณาพิมพ์กลิ่นที่ ${next.scents.length + 1} ครับ`,
+        summaryShown: false,
+      };
+    }
+    return {
+      nextState: "collecting_customer",
+      nextDraft: next,
+      replyText: `✅ เลือกกลิ่นครบ ${need} กลิ่นเรียบร้อย: ${next.scents.join(", ")}\n\nกรุณากรอกข้อมูลลูกค้าครับ: ชื่อผู้รับ เบอร์มือถือ (10 หลัก) ที่อยู่ (สามารถส่งพร้อมกันใน 1 ข้อความได้ครับ)`,
+      summaryShown: false,
+    };
+  }
+
+  if (state === "collecting_customer") {
+    const parsed = parseCustomerFieldsInto(next, text);
+    const missing = customerMissingFields(parsed);
+    if (missing.length === 0) {
+      return {
+        nextState: "awaiting_confirmation",
+        nextDraft: parsed,
+        replyText: buildAwaitingSummary(parsed),
+        summaryShown: true,
+      };
+    }
+    return {
+      nextState: "collecting_customer",
+      nextDraft: parsed,
+      replyText: collectCustomerPrompt(parsed),
+      summaryShown: false,
+    };
+  }
+
+  if (state === "confirmed") {
+    return {
+      nextState: "confirmed",
+      nextDraft: next,
+      replyText: "รายการนี้ยืนยันแล้วครับ สามารถตรวจสอบสถานะใน Dashboard ได้เลยครับ หากต้องการสั่งซื้อใหม่ พิมพ์ เริ่มใหม่ ครับ",
+      summaryShown: false,
+    };
+  }
+
+  return {
+    nextState: ALLOWED_STATES.has(state) ? state : "new",
+    nextDraft: next,
+    replyText: "ขออภัยครับ กรุณาเริ่มการสนทนาใหม่หรือเลือก Set A/B/C/D ครับ",
+    summaryShown: false,
+  };
 }
 
 export default async function handler(req, res) {
@@ -190,6 +767,13 @@ export default async function handler(req, res) {
     lineAccessToken = "";
     console.error("LINE webhook warn: LINE_CHANNEL_ACCESS_TOKEN missing — replies will be skipped");
   }
+  let lineOrderToken;
+  try {
+    lineOrderToken = env("LINE_ORDER_API_TOKEN");
+  } catch (e) {
+    lineOrderToken = "";
+  }
+  const reqHost = String(req.headers?.host || "boombox-notion.vercel.app").replace(/\/$/, "");
 
   const summary = { processed: 0, duplicates: 0 };
 
@@ -225,7 +809,8 @@ export default async function handler(req, res) {
       if (msg.includes("duplicate") || msg.includes("23505") || msg.includes("unique")) {
         thisIsDuplicate = true;
       } else {
-        console.error("LINE webhook: supabase INSERT event error", e?.message || e);
+        const safeErr = String(e?.message || "").slice(0, 120);
+        console.error("LINE webhook: supabase INSERT event error", safeErr.length ? safeErr : "unknown");
         continue;
       }
     }
@@ -236,6 +821,8 @@ export default async function handler(req, res) {
     }
 
     let conversationRowId = null;
+    let convoState = "new";
+    let convoDraft = { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE };
     try {
       if (lineUserId) {
         const upsert = await supabase("line_conversations", {
@@ -246,32 +833,157 @@ export default async function handler(req, res) {
           body: JSON.stringify({
             line_user_id: lineUserId,
             state: "new",
-            draft: {},
+            draft: { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE },
             last_event_id: eventRowId,
             last_message_at: new Date().toISOString(),
             expires_at: new Date(Date.now() + 86400000).toISOString(),
           }),
         });
-        if (upsert && upsert[0]?.id) conversationRowId = upsert[0].id;
+        if (upsert && upsert[0]) {
+          conversationRowId = upsert[0].id;
+          if (upsert[0].state && ALLOWED_STATES.has(String(upsert[0].state))) {
+            convoState = String(upsert[0].state);
+          }
+          if (upsert[0].draft && typeof upsert[0].draft === "object" && !Array.isArray(upsert[0].draft)) {
+            const d = upsert[0].draft;
+            convoDraft = {
+              package: d.package && typeof d.package === "object" ? {
+                code: d.package.code || null,
+                name: d.package.name || null,
+                price: d.package.price || null,
+              } : { code: null, name: null, price: null },
+              scents: Array.isArray(d.scents) ? d.scents.slice().filter((x) => FLAVORS.has(x)) : [],
+              deviceColor: String(d.deviceColor || "") || null,
+              customer: d.customer && typeof d.customer === "object" ? {
+                displayName: d.customer.displayName || d.customer.name || null,
+                name: d.customer.name || d.customer.displayName || null,
+                phone: d.customer.phone || null,
+                shippingAddress: d.customer.shippingAddress || d.customer.address || null,
+                address: d.customer.address || d.customer.shippingAddress || null,
+              } : {},
+              shippingFee: Number(d.shippingFee ?? DEFAULT_SHIPPING_FEE),
+              editing: d.editing || null,
+            };
+          }
+        }
       }
     } catch (e) {
-      console.error("LINE webhook: supabase upsert convo error", e?.message || e);
+      const safeErr = String(e?.message || "").slice(0, 120);
+      console.error("LINE webhook: supabase upsert convo error", safeErr.length ? safeErr : "unknown");
+    }
+
+    let replyText = null;
+    let nextState = convoState;
+    let nextDraft = convoDraft;
+    let confirmTriggered = false;
+
+    if (evType === "message" && ev.message?.type === "text" && typeof ev.message.text === "string") {
+      const ctx = { packages: PACKAGES, flavors: FLAVORS, allowedStates: ALLOWED_STATES, confirmWhitelist: CONFIRM_WHITELIST, cancelKeyword: CANCEL_KEYWORD, editKeyword: EDIT_KEYWORD };
+      const reduced = reduceConversation(convoState, convoDraft, ev.message.text, ctx);
+      if (reduced && reduced.confirmTriggered) {
+        confirmTriggered = true;
+        nextState = "awaiting_confirmation";
+        nextDraft = reduced.nextDraft;
+      } else if (reduced) {
+        nextState = ALLOWED_STATES.has(reduced.nextState) ? reduced.nextState : convoState;
+        nextDraft = reduced.nextDraft;
+        replyText = reduced.replyText;
+      }
+    } else if (evType === "follow") {
+      replyText = buildStaticReply(ev);
+      nextState = "new";
+      nextDraft = { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE, editing: null };
+    } else if (evType === "message" && ev.message?.type && ev.message.type !== "text") {
+      replyText = "กรุณาส่งข้อความพิมพ์ครับ";
+    } else {
+      replyText = buildStaticReply(ev);
+    }
+
+    if (confirmTriggered) {
+      if (!draftComplete(nextDraft)) {
+        replyText = "ขออภัยครับ ข้อมูลยังไม่ครบ กรุณากรอกข้อมูลที่ขาดครับ\n\n" + collectCustomerPrompt(nextDraft);
+        nextState = "collecting_customer";
+        confirmTriggered = false;
+      } else {
+        const code = nextDraft.package.code;
+        const pkg = PACKAGES[code];
+        const scents = code === "A" ? [] : (nextDraft.scents || []);
+        const cust = nextDraft.customer || {};
+        const payload = {
+          source: "line",
+          lineMessageId: String(ev.message?.id || ""),
+          idempotencyKey: `line:${String(ev.message?.id || "")}`,
+          lineUserId: lineUserId || undefined,
+          package: { code, name: pkg.name, price: pkg.price },
+          deviceColor: nextDraft.deviceColor,
+          scents: scents.slice(),
+          customer: {
+            displayName: cust.displayName || cust.name || "",
+            name: cust.name || cust.displayName || "",
+            phone: String(cust.phone || ""),
+            shippingAddress: cust.shippingAddress || cust.address || "",
+            address: cust.address || cust.shippingAddress || "",
+          },
+          shippingFee: Number(nextDraft.shippingFee ?? DEFAULT_SHIPPING_FEE),
+          customerNote: "",
+        };
+        if (!payload.lineMessageId) {
+          replyText = "ขออภัยครับ ไม่สามารถสร้างออเดอร์ได้ (ไม่มี Message ID)";
+          nextState = "awaiting_confirmation";
+        } else {
+          const orderRes = await callOrdersAPI(lineOrderToken, reqHost, payload);
+          const ok = orderRes.ok && orderRes.body?.success === true;
+          const orderObj = ok ? orderRes.body?.order : null;
+          const orderNumber = orderObj?.order_number;
+          if (ok && orderNumber) {
+            nextDraft.orderId = orderObj.id || null;
+            nextDraft.orderNumber = orderNumber;
+            nextState = "confirmed";
+            replyText = [
+              "✅ สั่งซื้อสำเร็จครับ",
+              `หมายเลขออเดอร์: ${orderNumber}`,
+              `Set ${code} (${pkg.name}) ฿${pkg.price + Number(payload.shippingFee || 0)}`,
+              `สี: ${nextDraft.deviceColor}`,
+              `ชื่อ: ${cust.displayName || cust.name || "-"}`,
+              `เบอร์โทร: ${maskPhone(cust.phone)}`,
+              `ที่อยู่: ${maskAddress(cust.shippingAddress || cust.address)}`,
+              `สถานะเริ่มต้น: รอยืนยัน (แอดมินจะตรวจสอบและติดต่อให้ครับ)`,
+              `สามารถตรวจสอบสถานะใน Dashboard ได้เลยครับ`,
+            ].join("\n");
+          } else {
+            nextState = "awaiting_confirmation";
+            const safeErr = String(orderRes?.body?.error || orderRes?.error || "").slice(0, 60);
+            replyText = "ขออภัยครับ ระบบสร้างออเดอร์ไม่สำเร็จในขณะนี้ โปรดลองอีกครั้งภายหลังครับ" + (safeErr ? ` (${safeErr})` : "");
+          }
+        }
+      }
+    }
+
+    if (conversationRowId) {
+      if (!ALLOWED_STATES.has(nextState)) nextState = "cancelled";
+      try {
+        await patchConversation(conversationRowId, {
+          state: nextState,
+          draft: JSON.parse(JSON.stringify(nextDraft)),
+          last_event_id: eventRowId,
+          last_message_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 86400000).toISOString(),
+        });
+      } catch (e) {
+        const safeErr = String(e?.message || "").slice(0, 120);
+        console.error("LINE webhook: supabase PATCH convo error", safeErr.length ? safeErr : "unknown");
+      }
     }
 
     let replyResult = { skipped: true };
-    if (replyToken && lineAccessToken) {
-      const text = buildStaticReply(ev);
-      if (text) {
-        replyResult = await callLineReply(lineAccessToken, replyToken, text);
-      } else {
-        replyResult = { skipped: true };
-      }
+    if (replyToken && lineAccessToken && replyText) {
+      replyResult = await callLineReply(lineAccessToken, replyToken, replyText);
     }
 
     let finalResult = "accepted";
     let finalReplyStatus = "skipped";
     let finalReplyError = null;
-    if (replyResult.skipped || !replyToken || !lineAccessToken) {
+    if (replyResult.skipped || !replyToken || !lineAccessToken || !replyText) {
       finalReplyStatus = "skipped";
       finalResult = "accepted";
     } else if (replyResult.ok) {
@@ -296,7 +1008,8 @@ export default async function handler(req, res) {
       });
       summary.processed++;
     } catch (e) {
-      console.error("LINE webhook: finalize event row error", e?.message || e);
+      const safeErr = String(e?.message || "").slice(0, 120);
+      console.error("LINE webhook: finalize event row error", safeErr.length ? safeErr : "unknown");
     }
   }
 
