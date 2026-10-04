@@ -496,19 +496,54 @@ async function handleImportCommit(req, res) {
   });
 }
 
+function normalizeColor(c) {
+  let s = String(c || "").trim();
+  if (s.startsWith("สี")) s = s.slice(2).trim();
+  if (!s) return "";
+  return s;
+}
+
 async function findDeviceProduct(color, packageCode, machine_type_hint) {
+  const rawColor = color || null;
+  const norm = normalizeColor(rawColor);
+
   let machineType = "regular";
   if (packageCode === "D") machineType = "vip";
   else if (machine_type_hint === "mini") machineType = "mini";
 
-  const rows = await supabase(
-    `products?select=*&product_type=eq.device&color=eq.${encodeURIComponent(color || "")}&limit=10`,
+  if (rawColor) {
+    const exactRows = await supabase(
+      `products?select=*&product_type=eq.device&color=eq.${encodeURIComponent(rawColor)}&limit=10`,
+      { method: "GET" }
+    );
+    if (exactRows?.length) return exactRows[0];
+  }
+
+  if (norm) {
+    const normRows = await supabase(
+      `products?select=*&product_type=eq.device&color=eq.${encodeURIComponent(norm)}&limit=10`,
+      { method: "GET" }
+    );
+    if (normRows?.length) return normRows[0];
+  }
+
+  const allRows = await supabase(
+    `products?select=*&product_type=eq.device&limit=50`,
     { method: "GET" }
   );
-  if (!rows?.length) return null;
-
-  const match = rows[0];
-  return match;
+  if (!allRows?.length) return null;
+  const searchTerms = [];
+  if (rawColor) searchTerms.push(String(rawColor).toLowerCase());
+  if (norm && norm !== rawColor) searchTerms.push(norm.toLowerCase());
+  if (searchTerms.length === 0) return allRows[0] || null;
+  return allRows.find(p => {
+    const c = normalizeColor(p.color);
+    const cn = String(p.canonical_name || "").toLowerCase();
+    return searchTerms.some(t => t && (
+      (c && c.toLowerCase() === t) ||
+      (cn && cn.includes(t))
+    ));
+  }) || allRows[0] || null;
 }
 
 async function findScentPackProduct(scentName) {
@@ -743,6 +778,7 @@ async function handleSyncOrderStatus(req, res) {
 
     const deviceColor = order.device_color || null;
     const pkgCode = order.package_code || "A";
+    let movements_failed = [];
     const device = await findDeviceProduct(deviceColor, pkgCode);
     if (device) {
       const mv = {
@@ -755,12 +791,16 @@ async function handleSyncOrderStatus(req, res) {
         note: `Order ${order.order_number || order_id} device sale`,
         created_by: createdBy,
       };
-      const ins = await supabase("stock_ledger", {
-        method: "POST",
-        headers: { Prefer: "return=representation" },
-        body: JSON.stringify(mv),
-      });
-      movements.push(ins?.[0] || mv);
+      try {
+        const ins = await supabase("stock_ledger", {
+          method: "POST",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify(mv),
+        });
+        movements.push(ins?.[0] || mv);
+      } catch (mvErr) {
+        movements_failed.push({ kind: "device", reason: String(mvErr?.message || "unknown").slice(0,200) });
+      }
     }
 
     const scents = Array.isArray(order.scents) ? order.scents : [];
@@ -778,15 +818,24 @@ async function handleSyncOrderStatus(req, res) {
           note: `Order ${order.order_number || order_id} scent: ${scentName}`,
           created_by: createdBy,
         };
-        const ins = await supabase("stock_ledger", {
-          method: "POST",
-          headers: { Prefer: "return=representation" },
-          body: JSON.stringify(mv),
-        });
-        movements.push(ins?.[0] || mv);
+        try {
+          const ins = await supabase("stock_ledger", {
+            method: "POST",
+            headers: { Prefer: "return=representation" },
+            body: JSON.stringify(mv),
+          });
+          movements.push(ins?.[0] || mv);
+        } catch (mvErr) {
+          movements_failed.push({ kind: "scent", scent: scentName, reason: String(mvErr?.message || "unknown").slice(0,200) });
+        }
+      } else {
+        movements_failed = movements_failed || [];
+        movements_failed.push({ kind: "scent", scent: scentName, reason: "product_not_found" });
       }
     }
-    return json(res, 200, { success: true, transition: "pending→confirmed", movements_created: movements.length, movements });
+    const modeAResult = { success: true, transition: "pending→confirmed", movements_created: movements.length, movements };
+    if (movements_failed && movements_failed.length) modeAResult.movements_failed = movements_failed;
+    return json(res, 200, modeAResult);
   }
 
   if (new_status === "cancelled" && old_status === "confirmed") {
