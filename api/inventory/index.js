@@ -659,7 +659,12 @@ async function handleSyncOrderStatus(req, res) {
 export default async function handler(req, res) {
   try {
     const urlPath = (req.url || "").split("?")[0];
-    const path = urlPath.replace(/^\/api\/inventory\/?/, "");
+    let path = urlPath
+      .replace(/^\/api\/inventory\/?/, "")
+      .replace(/^\/api\/inventory\.js\/?/, "")
+      .replace(/^\[\[\.\.\.path\]\]\/?/, "")
+      .replace(/^\.\//, "");
+    if (path.startsWith("/")) path = path.slice(1);
 
     const isRead = (req.method === "GET") ||
       (req.method === "POST" && path !== "ledger" && path !== "stocktake" && path !== "import/preview" && path !== "import/commit" && path !== "sync-order-status");
