@@ -534,12 +534,186 @@ async function findScentPackProduct(scentName) {
   }) || null;
 }
 
+async function resolveProductId(item) {
+  if (item.product_id) return String(item.product_id);
+
+  if (item.sku) {
+    const rows = await supabase(
+      `products?select=id&sku=eq.${encodeURIComponent(String(item.sku))}&limit=1`,
+      { method: "GET" }
+    );
+    if (rows?.[0]?.id) return rows[0].id;
+  }
+
+  if (item.alias) {
+    const rows = await supabase(
+      `aliases?select=canonical_product_id&alias=eq.${encodeURIComponent(String(item.alias))}&limit=1`,
+      { method: "GET" }
+    );
+    if (rows?.[0]?.canonical_product_id) return rows[0].canonical_product_id;
+  }
+
+  if (item.product_type === "device" || item.device_color) {
+    const device = await findDeviceProduct(item.device_color, item.package_code, item.machine_type);
+    if (device?.id) return device.id;
+  }
+
+  if (item.product_type === "scent_pack" || item.scent_name || item.flavor) {
+    const scent = await findScentPackProduct(item.scent_name || item.flavor);
+    if (scent?.id) return scent.id;
+  }
+
+  if (item.product_name || item.canonical_name || item.name) {
+    const cn = String(item.product_name || item.canonical_name || item.name || "");
+    const rows = await supabase(
+      `products?select=id&canonical_name=eq.${encodeURIComponent(cn)}&limit=1`,
+      { method: "GET" }
+    );
+    if (rows?.[0]?.id) return rows[0].id;
+  }
+
+  return null;
+}
+
+async function handleSaleDirectDeduct(body) {
+  const sourceOrderId = body.source_order_id || body.reference_id;
+  if (!sourceOrderId) return { status: 400, body: { success: false, error: "source_order_id is required for direct sale mode" } };
+
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (!items.length) return { status: 400, body: { success: false, error: "items array is required" } };
+
+  const refId = String(sourceOrderId);
+  const refType = "line_order";
+  const existing = await supabase(
+    `stock_ledger?select=*&reference_type=eq.${refType}&reference_id=eq.${encodeURIComponent(refId)}&movement_type=in.(sale,reservation,release,return)`,
+    { method: "GET" }
+  );
+  const existingSale = (existing || []).filter((r) => r.movement_type === "sale");
+  if (existingSale.length > 0) {
+    return {
+      status: 200,
+      body: {
+        success: true,
+        skipped: true,
+        reason: "sale_movements_already_exist",
+        source_order_id: sourceOrderId,
+        existing_sale_count: existingSale.length,
+      },
+    };
+  }
+
+  const orderNumber = body.order_number || null;
+  const lineMessageId = body.line_message_id || null;
+  const createdBy = "sync-order-api-direct";
+  const failedItems = [];
+  const movements = [];
+  let totalMachinesDeducted = 0;
+  let totalBeadsDeducted = 0;
+
+  for (let idx = 0; idx < items.length; idx++) {
+    const item = items[idx];
+    const qtyRaw = Number(item.qty ?? item.quantity ?? 1);
+    const qty = isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 0;
+    if (!qty) {
+      failedItems.push({ index: idx, item, reason: "invalid_qty" });
+      continue;
+    }
+
+    let productId = null;
+    try {
+      productId = await resolveProductId(item);
+    } catch (_) {
+      productId = null;
+    }
+    if (!productId) {
+      failedItems.push({ index: idx, item, reason: "product_not_resolved" });
+      continue;
+    }
+
+    let product = null;
+    try {
+      const prodRows = await supabase(
+        `products?select=*&id=eq.${encodeURIComponent(productId)}&limit=1`,
+        { method: "GET" }
+      );
+      product = prodRows?.[0] || null;
+    } catch (_) {
+      product = null;
+    }
+    const pType = product?.product_type || item.product_type || null;
+    const packSize = product?.pack_size ? Number(product.pack_size) : (pType === "scent_pack" ? 100 : 1);
+
+    let delta;
+    if (item.quantity_delta !== undefined && item.quantity_delta !== null) {
+      delta = -1 * Math.abs(Number(item.quantity_delta));
+    } else if (pType === "scent_pack") {
+      delta = -1 * qty * packSize;
+    } else {
+      delta = -1 * qty;
+    }
+
+    const reasonBase = `Sale ${orderNumber ? `Order ${orderNumber}` : sourceOrderId}`;
+    const reasonItem = item.scent_name || item.flavor || item.device_color || item.sku || item.name || `item#${idx}`;
+    const mv = {
+      product_id: productId,
+      movement_type: "sale",
+      quantity_delta: delta,
+      reference_type: refType,
+      reference_id: refId,
+      reason: `${reasonBase} - ${reasonItem}${lineMessageId ? ` (msg: ${lineMessageId.slice(0,16)})` : ""}`,
+      note: orderNumber ? `Order ${orderNumber} direct deduct${lineMessageId ? ` lineMsgId: ${lineMessageId}` : ""}` : `source: ${sourceOrderId}`,
+      created_by: createdBy,
+    };
+
+    try {
+      const ins = await supabase("stock_ledger", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify(mv),
+      });
+      const inserted = ins?.[0] || mv;
+      movements.push(inserted);
+      if (pType === "device") totalMachinesDeducted += qty;
+      else if (pType === "scent_pack") totalBeadsDeducted += (-1 * delta);
+    } catch (e) {
+      const errMsg = String(e?.message || "").slice(0, 200);
+      failedItems.push({ index: idx, item, reason: "ledger_write_failed", error: errMsg || "unknown" });
+    }
+  }
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      skipped: false,
+      mode: "direct_sale_deduct",
+      source_order_id: sourceOrderId,
+      order_number: orderNumber,
+      line_message_id: lineMessageId,
+      ledger_written: movements.length,
+      failed_items: failedItems,
+      total_failed: failedItems.length,
+      total_machines_deducted: totalMachinesDeducted,
+      total_beads_deducted: totalBeadsDeducted,
+      movements,
+    },
+  };
+}
+
 async function handleSyncOrderStatus(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
   const body = req.body || {};
+
+  const hasDirectSale = body.source_order_id !== undefined || body.reference_id !== undefined;
+  const isDirectSaleMode = hasDirectSale && Array.isArray(body.items);
+  if (isDirectSaleMode) {
+    const result = await handleSaleDirectDeduct(body);
+    return json(res, result.status, result.body);
+  }
+
   const { order_id, new_status, old_status } = body;
 
-  if (!order_id) return json(res, 400, { success: false, error: "order_id is required" });
+  if (!order_id) return json(res, 400, { success: false, error: "order_id is required (or use source_order_id + items for direct mode)" });
   if (!ORDER_STATUSES.has(new_status)) return json(res, 400, { success: false, error: `new_status must be one of: ${[...ORDER_STATUSES].join(", ")}` });
 
   const orderRows = await supabase(
