@@ -58,8 +58,7 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
   reason TEXT NOT NULL,
   note TEXT,
   created_by UUID,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT stock_ledger_line_order_idempotent UNIQUE (reference_id, movement_type)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS stock_ledger_line_order_idempotent_partial

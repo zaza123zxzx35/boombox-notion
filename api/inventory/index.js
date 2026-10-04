@@ -14,10 +14,10 @@ import { defaultSeedPreview } from "./_seed.js";
 async function getInventorySummary(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
 
-  const products = await supabase("inventory_products?select=*", { method: "GET" }) || [];
-  const aliases = await supabase("inventory_product_aliases?select=*", { method: "GET" }) || [];
+  const products = await supabase("products?select=*", { method: "GET" }) || [];
+  const aliases = await supabase("aliases?select=*", { method: "GET" }) || [];
   const balances = await supabase("inventory_balances?select=*", { method: "GET" }) || [];
-  const discrepancies = await supabase("inventory_discrepancies?select=*", { method: "GET" }) || [];
+  const discrepancies = await supabase("discrepancies?select=*", { method: "GET" }) || [];
 
   const balanceMap = new Map();
   (balances || []).forEach((b) => balanceMap.set(b.product_id, b));
@@ -35,7 +35,7 @@ async function getInventorySummary(req, res) {
     if (p.product_type === "scent_pack" && Number(p.pack_size) === 100) {
       scentPacks100Available += (Number(bal.on_hand || 0) / 100);
     }
-    if (p.flag === "blocked" || !p.active) blockedCount++;
+    if (!p.active) blockedCount++;
     const avail = Number(bal.available ?? bal.on_hand ?? 0);
     if (p.product_type === "device" && avail <= 1) lowStock.push({ id: p.id, name: p.canonical_name, available: avail });
     if (p.product_type === "scent_pack" && Number(p.pack_size) === 100) {
@@ -65,7 +65,7 @@ async function getInventorySummary(req, res) {
 
 async function getProducts(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
-  const rows = await supabase("inventory_products?select=*&order=created_at.desc", { method: "GET" });
+  const rows = await supabase("products?select=*&order=created_at.desc", { method: "GET" });
   return json(res, 200, { success: true, products: rows || [] });
 }
 
@@ -73,7 +73,7 @@ async function getLedger(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
   const productId = req.query?.product_id;
   const limit = Number(req.query?.limit || 200);
-  let path = `inventory_ledger?select=*&order=created_at.desc&limit=${limit}`;
+  let path = `stock_ledger?select=*&order=created_at.desc&limit=${limit}`;
   if (productId) path += `&product_id=eq.${encodeURIComponent(productId)}`;
   const rows = await supabase(path, { method: "GET" });
   return json(res, 200, { success: true, ledger: rows || [] });
@@ -81,7 +81,7 @@ async function getLedger(req, res) {
 
 async function getDiscrepancies(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
-  const rows = await supabase("inventory_discrepancies?select=*&order=created_at.desc", { method: "GET" });
+  const rows = await supabase("discrepancies?select=*&order=created_at.desc", { method: "GET" });
   return json(res, 200, { success: true, discrepancies: rows || [] });
 }
 
@@ -107,13 +107,14 @@ async function handlePostLedger(req, res) {
     product_id: body.product_id,
     movement_type: body.movement_type,
     quantity_delta: Number(body.quantity_delta),
-    reference_type: body.reference_type || "manual",
+    reference_type: body.reference_type || "admin",
     reference_id: body.reference_id || null,
+    reason: body.reason || body.note || "admin ledger entry",
     note: body.note || null,
     created_by: body.created_by || "api-ledger",
   };
 
-  const inserted = await supabase("inventory_ledger", {
+  const inserted = await supabase("stock_ledger", {
     method: "POST",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify(row),
@@ -153,10 +154,11 @@ async function handleStocktake(req, res) {
         quantity_delta: diff,
         reference_type: "stocktake",
         reference_id: stocktakeRef,
+        reason: item.reason || item.note || `Stocktake diff: counted=${item.counted_quantity}, was=${onHand}`,
         note: item.note || `Stocktake diff: counted=${item.counted_quantity}, was=${onHand}`,
         created_by: createdBy,
       };
-      const inserted = await supabase("inventory_ledger", {
+      const inserted = await supabase("stock_ledger", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(mv),
@@ -168,12 +170,9 @@ async function handleStocktake(req, res) {
         status: "open",
         expected_quantity: onHand,
         counted_quantity: Number(item.counted_quantity),
-        quantity_delta: diff,
         reason: item.reason || item.note || `Stocktake discrepancy: ${diff > 0 ? "over" : "short"} ${Math.abs(diff)}`,
-        detected_by: createdBy,
-        stocktake_reference: stocktakeRef,
       };
-      await supabase("inventory_discrepancies", {
+      await supabase("discrepancies", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(disc),
@@ -217,11 +216,10 @@ async function handlePatchDiscrepancy(req, res) {
   }
   if (body.reason) updates.reason = body.reason;
   if (body.resolved_by && !updates.resolved_by) updates.resolved_by = body.resolved_by;
-  if (body.blocked_note) updates.blocked_note = body.blocked_note;
 
   if (!Object.keys(updates).length) return json(res, 400, { success: false, error: "No valid fields to update" });
 
-  const rows = await supabase(`inventory_discrepancies?id=eq.${encodeURIComponent(id)}`, {
+  const rows = await supabase(`discrepancies?id=eq.${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify(updates),
@@ -311,12 +309,10 @@ async function handleImportCommit(req, res) {
   const importRef = body.import_reference || `import:${Date.now()}`;
 
   const importRow = {
-    import_reference: importRef,
-    total_items: items.length,
-    created_by: createdBy,
-    note: body.note || null,
+    source_notes: body.source_note || `Dashboard Admin Import ${new Date().toISOString().slice(0,10)}`,
+    import_data: { items, created_by: createdBy, import_reference: importRef },
   };
-  await supabase("inventory_initial_imports", {
+  await supabase("initial_imports", {
     method: "POST",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify(importRow),
@@ -326,26 +322,26 @@ async function handleImportCommit(req, res) {
   for (const item of items) {
     const productPayload = {
       canonical_name: item.canonical_name,
+      display_name: item.canonical_name,
       product_type: item.product_type,
+      sku: `SKU-${(item.canonical_name||"").replace(/[^A-Za-z0-9ก-ฮ]/g,"").slice(0,16)}-${Math.floor(Math.random()*9000+1000)}`,
       color: item.color || null,
-      machine_type: item.machine_type || null,
-      pack_size: item.pack_size || null,
-      unit_name: item.unit_name || null,
+      pack_size: item.pack_size || 1,
+      unit_name: item.unit_name || "unit",
       active: item.flag === "blocked" ? false : true,
-      flag: item.flag || "ok",
     };
 
     let product;
-    const existing = await supabase(`inventory_products?select=*&canonical_name=eq.${encodeURIComponent(item.canonical_name)}&limit=1`, { method: "GET" });
+    const existing = await supabase(`products?select=*&canonical_name=eq.${encodeURIComponent(item.canonical_name)}&limit=1`, { method: "GET" });
     if (existing?.[0]) {
-      const updated = await supabase(`inventory_products?id=eq.${encodeURIComponent(existing[0].id)}`, {
+      const updated = await supabase(`products?id=eq.${encodeURIComponent(existing[0].id)}`, {
         method: "PATCH",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(productPayload),
       });
       product = updated?.[0] || existing[0];
     } else {
-      const created = await supabase("inventory_products", {
+      const created = await supabase("products", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(productPayload),
@@ -356,10 +352,10 @@ async function handleImportCommit(req, res) {
     if (product && (item.aliases || []).length) {
       for (const alias of item.aliases) {
         try {
-          await supabase("inventory_product_aliases", {
+          await supabase("aliases", {
             method: "POST",
             headers: { Prefer: "return=representation" },
-            body: JSON.stringify({ product_id: product.id, alias_name: String(alias) }),
+            body: JSON.stringify({ canonical_product_id: product.id, alias: String(alias), alias_type: item.product_type === "device" ? "device_alias" : "scent_alias" }),
           });
         } catch (_) {}
       }
@@ -372,10 +368,11 @@ async function handleImportCommit(req, res) {
         quantity_delta: Number(item.counted_quantity),
         reference_type: "initial_import",
         reference_id: importRef,
+        reason: `Initial import opening balance`,
         note: `Initial import opening balance`,
         created_by: createdBy,
       };
-      await supabase("inventory_ledger", {
+      await supabase("stock_ledger", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(mv),
@@ -386,15 +383,12 @@ async function handleImportCommit(req, res) {
       const discPayload = {
         product_id: product.id,
         status: item.flag === "blocked" ? "blocked" : "open",
-        expected_quantity: null,
+        expected_quantity: 0,
         counted_quantity: Number(item.counted_quantity || 0),
-        quantity_delta: null,
         reason: item.discrepancy_reason || `Initial import flagged as ${item.flag}`,
-        detected_by: createdBy,
-        stocktake_reference: importRef,
-        ...(item.flag === "blocked" ? { blocked_note: item.discrepancy_reason || "Blocked during initial import" } : {}),
+        ...(item.flag === "blocked" ? { note: item.discrepancy_reason || "Blocked during initial import" } : {}),
       };
-      await supabase("inventory_discrepancies", {
+      await supabase("discrepancies", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(discPayload),
@@ -424,33 +418,30 @@ async function findDeviceProduct(color, packageCode, machine_type_hint) {
   else if (machine_type_hint === "mini") machineType = "mini";
 
   const rows = await supabase(
-    `inventory_products?select=*&product_type=eq.device&color=eq.${encodeURIComponent(color || "")}&limit=10`,
+    `products?select=*&product_type=eq.device&color=eq.${encodeURIComponent(color || "")}&limit=10`,
     { method: "GET" }
   );
   if (!rows?.length) return null;
 
-  let match = rows.find((r) => (r.machine_type || "regular") === machineType);
-  if (!match) match = rows.find((r) => (r.machine_type || "regular") === "regular");
-  if (!match && machineType === "mini") match = rows.find((r) => (r.machine_type || "") === "mini");
-  if (!match) match = rows[0];
+  const match = rows[0];
   return match;
 }
 
 async function findScentPackProduct(scentName) {
   const byName = await supabase(
-    `inventory_products?select=*&product_type=eq.scent_pack&canonical_name=eq.${encodeURIComponent(String(scentName || ""))}&limit=1`,
+    `products?select=*&product_type=eq.scent_pack&canonical_name=eq.${encodeURIComponent(String(scentName || ""))}&limit=1`,
     { method: "GET" }
   );
   if (byName?.[0]) return byName[0];
 
   const byAlias = await supabase(
-    `inventory_product_aliases?select=product_id,inventory_products(*)&alias_name=eq.${encodeURIComponent(String(scentName || ""))}&limit=1`,
+    `aliases?select=canonical_product_id,products(*)&alias=eq.${encodeURIComponent(String(scentName || ""))}&limit=1`,
     { method: "GET" }
   );
-  if (byAlias?.[0]?.inventory_products) {
-    return Array.isArray(byAlias[0].inventory_products) ? byAlias[0].inventory_products[0] : byAlias[0].inventory_products;
+  if (byAlias?.[0]?.products) {
+    return Array.isArray(byAlias[0].products) ? byAlias[0].products[0] : byAlias[0].products;
   }
-  const all = await supabase(`inventory_products?select=*&product_type=eq.scent_pack&limit=200`, { method: "GET" });
+  const all = await supabase(`products?select=*&product_type=eq.scent_pack&limit=200`, { method: "GET" });
   if (!all?.length) return null;
   return all.find((p) => {
     const cn = String(p.canonical_name || "").toLowerCase();
@@ -475,7 +466,7 @@ async function handleSyncOrderStatus(req, res) {
   if (!order) return json(res, 404, { success: false, error: "Order not found" });
 
   const existingLedger = await supabase(
-    `inventory_ledger?select=*&reference_type=eq.line_order&reference_id=eq.${encodeURIComponent(order_id)}&movement_type=in.(sale,reservation,release,return)`,
+    `stock_ledger?select=*&reference_type=eq.line_order&reference_id=eq.${encodeURIComponent(order_id)}&movement_type=in.(sale,reservation,release,return)`,
     { method: "GET" }
   );
   const existing = existingLedger || [];
@@ -502,10 +493,11 @@ async function handleSyncOrderStatus(req, res) {
         quantity_delta: -1,
         reference_type: refType,
         reference_id: refId,
+        reason: `Order ${order.order_number || order_id} device sale`,
         note: `Order ${order.order_number || order_id} device sale`,
         created_by: createdBy,
       };
-      const ins = await supabase("inventory_ledger", {
+      const ins = await supabase("stock_ledger", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(mv),
@@ -524,10 +516,11 @@ async function handleSyncOrderStatus(req, res) {
           quantity_delta: beadsDelta,
           reference_type: refType,
           reference_id: refId,
+          reason: `Order ${order.order_number || order_id} scent: ${scentName}`,
           note: `Order ${order.order_number || order_id} scent: ${scentName}`,
           created_by: createdBy,
         };
-        const ins = await supabase("inventory_ledger", {
+        const ins = await supabase("stock_ledger", {
           method: "POST",
           headers: { Prefer: "return=representation" },
           body: JSON.stringify(mv),
@@ -553,10 +546,11 @@ async function handleSyncOrderStatus(req, res) {
         quantity_delta: -1 * Number(sale.quantity_delta),
         reference_type: refType,
         reference_id: refId,
+        reason: `Order ${order.order_number || order_id} cancelled - invert sale`,
         note: `Order ${order.order_number || order_id} cancelled - invert sale`,
         created_by: createdBy,
       };
-      const ins = await supabase("inventory_ledger", {
+      const ins = await supabase("stock_ledger", {
         method: "POST",
         headers: { Prefer: "return=representation" },
         body: JSON.stringify(mv),
