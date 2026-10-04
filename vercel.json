@@ -1,7 +1,9 @@
 {
   "cleanUrls": true,
-  "routes": [
-    { "src": "/api/inventory/?(.*)", "dest": "/api/inventory.js" },
-    { "handle": "filesystem" }
-  ]
+  "rewrites": {
+    "beforeFiles": [
+      { "source": "/api/inventory", "destination": "/api/inventory.js" },
+      { "source": "/api/inventory/:path*", "destination": "/api/inventory.js" }
+    ]
+  }
 }
