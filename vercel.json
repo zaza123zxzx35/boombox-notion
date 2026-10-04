@@ -1,9 +1,7 @@
 {
   "cleanUrls": true,
-  "rewrites": {
-    "beforeFiles": [
-      { "source": "/api/inventory", "destination": "/api/inventory.js" },
-      { "source": "/api/inventory/:path*", "destination": "/api/inventory.js" }
-    ]
-  }
+  "rewrites": [
+    { "source": "/api/inventory", "destination": "/api/inventory.js" },
+    { "source": "/api/inventory/:path*", "destination": "/api/inventory.js" }
+  ]
 }
