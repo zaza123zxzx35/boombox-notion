@@ -171,6 +171,9 @@ async function handleStocktake(req, res) {
         expected_quantity: onHand,
         counted_quantity: Number(item.counted_quantity),
         reason: item.reason || item.note || `Stocktake discrepancy: ${diff > 0 ? "over" : "short"} ${Math.abs(diff)}`,
+        note: item.note || item.reason || null,
+        detected_by: createdBy,
+        stocktake_reference: stocktakeRef,
       };
       await supabase("discrepancies", {
         method: "POST",
@@ -309,8 +312,10 @@ async function handleImportCommit(req, res) {
   const importRef = body.import_reference || `import:${Date.now()}`;
 
   const importRow = {
+    import_reference: importRef,
     source_notes: body.source_note || `Dashboard Admin Import ${new Date().toISOString().slice(0,10)}`,
     import_data: { items, created_by: createdBy, import_reference: importRef },
+    created_by: createdBy,
   };
   await supabase("initial_imports", {
     method: "POST",
@@ -329,6 +334,7 @@ async function handleImportCommit(req, res) {
       pack_size: item.pack_size || 1,
       unit_name: item.unit_name || "unit",
       active: item.flag === "blocked" ? false : true,
+      flag: item.flag || "ok",
     };
 
     let product;
@@ -386,7 +392,9 @@ async function handleImportCommit(req, res) {
         expected_quantity: 0,
         counted_quantity: Number(item.counted_quantity || 0),
         reason: item.discrepancy_reason || `Initial import flagged as ${item.flag}`,
-        ...(item.flag === "blocked" ? { note: item.discrepancy_reason || "Blocked during initial import" } : {}),
+        note: item.flag === "blocked" ? (item.discrepancy_reason || "Blocked during initial import") : (item.discrepancy_reason || null),
+        detected_by: createdBy,
+        stocktake_reference: importRef,
       };
       await supabase("discrepancies", {
         method: "POST",

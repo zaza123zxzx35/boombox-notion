@@ -29,10 +29,10 @@ const ALLOWED_MOVEMENTS = new Set([
 
 const ALLOWED_REFERENCE_TYPES = new Set([
   "line_order",
-  "manual",
+  "admin",
   "stocktake",
   "initial_import",
-  "opening_balance",
+  "import",
 ]);
 
 const ALLOWED_DISCREPANCY_STATUS = new Set([

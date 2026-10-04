@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS products (
   display_name TEXT NOT NULL,
   sku TEXT NOT NULL,
   cost_per_unit NUMERIC(10,2) NOT NULL DEFAULT 0,
+  flag TEXT NOT NULL DEFAULT 'ok',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT products_sku_unique UNIQUE (sku)
@@ -54,10 +55,10 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
   movement_type movement_type NOT NULL,
   quantity_delta INT NOT NULL,
   reference_type TEXT CHECK (reference_type IN ('line_order', 'stocktake', 'import', 'admin', 'initial_import')),
-  reference_id UUID,
+  reference_id TEXT,
   reason TEXT NOT NULL,
   note TEXT,
-  created_by UUID,
+  created_by TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -74,7 +75,10 @@ CREATE TABLE IF NOT EXISTS discrepancies (
   unit TEXT NOT NULL DEFAULT 'unit',
   status discrepancy_status NOT NULL DEFAULT 'open',
   reason TEXT NOT NULL,
-  resolved_by UUID,
+  note TEXT,
+  detected_by TEXT,
+  stocktake_reference TEXT,
+  resolved_by TEXT,
   resolved_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -82,10 +86,11 @@ CREATE TABLE IF NOT EXISTS discrepancies (
 
 CREATE TABLE IF NOT EXISTS initial_imports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  import_reference TEXT,
   source_notes TEXT NOT NULL,
   import_date TIMESTAMPTZ NOT NULL DEFAULT now(),
   import_data JSONB,
-  created_by UUID,
+  created_by TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
