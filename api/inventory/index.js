@@ -661,18 +661,21 @@ export default async function handler(req, res) {
     const urlPath = (req.url || "").split("?")[0];
     const path = urlPath.replace(/^\/api\/inventory\/?/, "");
 
-    if (req.method === "GET") {
-      if (path === "" || path === "summary") return await getInventorySummary(req, res);
-      if (path === "products") return await getProducts(req, res);
-      if (path === "ledger") return await getLedger(req, res);
-      if (path === "discrepancies") return await getDiscrepancies(req, res);
-    }
+    const isRead = (req.method === "GET") ||
+      (req.method === "POST" && path !== "ledger" && path !== "stocktake" && path !== "import/preview" && path !== "import/commit" && path !== "sync-order-status");
+
     if (req.method === "POST") {
       if (path === "ledger") return await handlePostLedger(req, res);
       if (path === "stocktake") return await handleStocktake(req, res);
       if (path === "import/preview") return await handleImportPreview(req, res);
       if (path === "import/commit") return await handleImportCommit(req, res);
       if (path === "sync-order-status") return await handleSyncOrderStatus(req, res);
+    }
+    if (isRead) {
+      if (path === "" || path === "summary") return await getInventorySummary(req, res);
+      if (path === "products") return await getProducts(req, res);
+      if (path === "ledger") return await getLedger(req, res);
+      if (path === "discrepancies") return await getDiscrepancies(req, res);
     }
     if (req.method === "PATCH") {
       if (path === "discrepancies") return await handlePatchDiscrepancy(req, res);
