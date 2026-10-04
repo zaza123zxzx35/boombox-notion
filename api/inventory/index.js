@@ -15,12 +15,26 @@ async function getInventorySummary(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
 
   const products = await supabase("products?select=*", { method: "GET" }) || [];
-  const aliases = await supabase("aliases?select=*", { method: "GET" }) || [];
+  const aliasesRows = await supabase("aliases?select=*", { method: "GET" }) || [];
   const balances = await supabase("inventory_balances?select=*", { method: "GET" }) || [];
   const discrepancies = await supabase("discrepancies?select=*", { method: "GET" }) || [];
 
   const balanceMap = new Map();
   (balances || []).forEach((b) => balanceMap.set(b.product_id, b));
+
+  const aliasesMap = {};
+  (aliasesRows || []).forEach((a) => {
+    const pid = a.canonical_product_id || a.product_id;
+    if (!pid) return;
+    if (!aliasesMap[pid]) aliasesMap[pid] = [];
+    if (a.alias) aliasesMap[pid].push(a.alias);
+  });
+
+  const productsMap = new Map();
+  (products || []).forEach((p) => productsMap.set(p.id, p));
+
+  const machines = (products || []).filter((p) => p.product_type === "device");
+  const scents = (products || []).filter((p) => p.product_type === "scent_pack");
 
   let machinesAvailable = 0;
   let scentPacks100Available = 0;
@@ -37,10 +51,10 @@ async function getInventorySummary(req, res) {
     }
     if (!p.active) blockedCount++;
     const avail = Number(bal.available ?? bal.on_hand ?? 0);
-    if (p.product_type === "device" && avail <= 1) lowStock.push({ id: p.id, name: p.canonical_name, available: avail });
+    if (p.product_type === "device" && avail <= 1) lowStock.push({ id: p.id, name: p.canonical_name, title: p.display_name, stock: avail, unit: p.unit_name || "เครื่อง", threshold: Number(p.low_stock_threshold || 1) });
     if (p.product_type === "scent_pack" && Number(p.pack_size) === 100) {
       const packs = Math.floor(avail / 100);
-      if (packs <= 2) lowStock.push({ id: p.id, name: p.canonical_name, available_packs: packs, available_beads: avail });
+      if (packs <= 2) lowStock.push({ id: p.id, name: p.canonical_name, title: p.display_name, available_packs: packs, available_beads: avail, stock: packs, unit: "pack", threshold: 2 });
     }
   });
 
@@ -50,15 +64,26 @@ async function getInventorySummary(req, res) {
     success: true,
     summary: {
       machinesAvailable,
+      machines_ready: machinesAvailable,
       scentPacks100Available,
+      packs_100: scentPacks100Available,
+      packs100: scentPacks100Available,
+      packs_200: 0,
+      packs200: 0,
       lowStock,
+      low_stock: lowStock,
       blockedCount,
+      blocked_count: blockedCount,
+      discrepancy_count: discrepancies.length,
       totalProducts: (products || []).length,
-      openDiscrepancies: (discrepancies || []).filter((d) => d.status === "open" || d.status === "confirmed").length,
+      openDiscrepancies: (discrepancies || []).filter((d) => d.status === "open" || d.status === "confirmed" || d.status === "blocked").length,
     },
     products,
-    aliases,
+    machines,
+    scents,
+    aliases: aliasesMap,
     balances,
+    balance_by_product: balanceMap.size ? Object.fromEntries(balanceMap) : null,
     discrepancies,
   });
 }
@@ -66,7 +91,9 @@ async function getInventorySummary(req, res) {
 async function getProducts(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
   const rows = await supabase("products?select=*&order=created_at.desc", { method: "GET" });
-  return json(res, 200, { success: true, products: rows || [] });
+  const machines = (rows || []).filter((p) => p.product_type === "device");
+  const scents = (rows || []).filter((p) => p.product_type === "scent_pack");
+  return json(res, 200, { success: true, products: rows || [], machines, scents });
 }
 
 async function getLedger(req, res) {
@@ -82,7 +109,22 @@ async function getLedger(req, res) {
 async function getDiscrepancies(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
   const rows = await supabase("discrepancies?select=*&order=created_at.desc", { method: "GET" });
-  return json(res, 200, { success: true, discrepancies: rows || [] });
+  const products = await supabase("products?select=id,canonical_name,display_name,color,product_type,unit_name", { method: "GET" }) || [];
+  const pmap = new Map(); products.forEach((p) => pmap.set(p.id, p));
+  const enriched = (rows || []).map((d) => {
+    const p = pmap.get(d.product_id) || {};
+    return {
+      ...d,
+      product_name: p.display_name || p.canonical_name || null,
+      name: p.display_name || p.canonical_name || null,
+      system_qty: Number(d.expected_quantity || 0),
+      counted_qty: Number(d.counted_quantity || 0),
+      diff: Number(d.difference || 0),
+      blocked: d.status === "blocked",
+      flagged: d.status === "open" || d.status === "confirmed",
+    };
+  });
+  return json(res, 200, { success: true, discrepancies: enriched });
 }
 
 async function handlePostLedger(req, res) {
@@ -90,27 +132,42 @@ async function handlePostLedger(req, res) {
   const body = req.body || {};
 
   if (!body.product_id) return json(res, 400, { success: false, error: "product_id is required" });
-  if (typeof body.quantity_delta !== "number") return json(res, 400, { success: false, error: "quantity_delta must be a number" });
-  if (!ALLOWED_MOVEMENTS.has(body.movement_type)) return json(res, 400, { success: false, error: `movement_type must be one of: ${[...ALLOWED_MOVEMENTS].join(", ")}` });
-  if (body.reference_type && !ALLOWED_REFERENCE_TYPES.has(body.reference_type)) return json(res, 400, { success: false, error: `reference_type must be one of: ${[...ALLOWED_REFERENCE_TYPES].join(", ")}` });
-  if (body.movement_type === "opening_balance") return json(res, 400, { success: false, error: "opening_balance must be set via import/commit, not direct ledger" });
 
-  if (body.quantity_delta < 0) {
+  let movement_type = body.movement_type;
+  let qtyRaw = body.quantity_delta ?? body.qty ?? body.quantity ?? 0;
+  const kind = body.kind;
+
+  if (movement_type === "damaged" || movement_type === "lost") movement_type = "adjustment";
+
+  if (typeof qtyRaw !== "number") qtyRaw = Number(qtyRaw);
+  if (!Number.isFinite(qtyRaw)) return json(res, 400, { success: false, error: "qty / quantity_delta must be a number" });
+  if (body.movement_type === undefined && kind) movement_type = (kind === "purchase" || kind === "in") ? "purchase" : (kind === "sale" || kind === "out") ? "sale" : "adjustment";
+
+  if (!ALLOWED_MOVEMENTS.has(movement_type)) return json(res, 400, { success: false, error: `movement_type must be one of: ${[...ALLOWED_MOVEMENTS].join(", ")}` });
+  if (body.reference_type && !ALLOWED_REFERENCE_TYPES.has(body.reference_type)) return json(res, 400, { success: false, error: `reference_type must be one of: ${[...ALLOWED_REFERENCE_TYPES].join(", ")}` });
+  if (movement_type === "opening_balance") return json(res, 400, { success: false, error: "opening_balance must be set via import/commit, not direct ledger" });
+
+  const signedDelta = (typeof body.quantity_delta === "number") ? Number(body.quantity_delta)
+    : (movement_type === "purchase" || movement_type === "return" || (movement_type === "adjustment" && kind === "in" || kind === "purchase" || body.kind === "in"))
+      ? Math.abs(qtyRaw)
+      : -1 * Math.abs(qtyRaw);
+
+  if (signedDelta < 0) {
     const balRows = await supabase(`inventory_balances?select=*&product_id=eq.${encodeURIComponent(body.product_id)}&limit=1`, { method: "GET" });
     const onHand = Number(balRows?.[0]?.on_hand || 0);
-    if (onHand + body.quantity_delta < 0) {
-      return json(res, 400, { success: false, error: `Insufficient balance: on_hand=${onHand}, requested_delta=${body.quantity_delta}` });
+    if (onHand + signedDelta < 0) {
+      return json(res, 400, { success: false, error: `Insufficient balance: on_hand=${onHand}, requested_delta=${signedDelta}` });
     }
   }
 
   const row = {
     product_id: body.product_id,
-    movement_type: body.movement_type,
-    quantity_delta: Number(body.quantity_delta),
+    movement_type,
+    quantity_delta: Number(signedDelta),
     reference_type: body.reference_type || "admin",
     reference_id: body.reference_id || null,
-    reason: body.reason || body.note || "admin ledger entry",
-    note: body.note || null,
+    reason: body.reason || body.note || body.movement_type || movement_type || "admin ledger entry",
+    note: body.note || body.reason || null,
     created_by: body.created_by || "api-ledger",
   };
 
@@ -132,8 +189,12 @@ async function handlePostLedger(req, res) {
 async function handleStocktake(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
   const body = req.body || {};
-  const items = Array.isArray(body.items) ? body.items : [];
-  if (!items.length) return json(res, 400, { success: false, error: "items array is required" });
+
+  let items = Array.isArray(body.items) ? body.items : [];
+  if (!items.length && body.product_id && typeof body.counted_quantity === "number") {
+    items = [{ product_id: body.product_id, counted_quantity: body.counted_quantity, reason: body.reason, note: body.note }];
+  }
+  if (!items.length) return json(res, 400, { success: false, error: "items array or single (product_id + counted_quantity) is required" });
 
   const results = [];
   const createdBy = body.created_by || "stocktake-api";
@@ -202,9 +263,9 @@ async function handleStocktake(req, res) {
 
 async function handlePatchDiscrepancy(req, res) {
   if (!isAuthorizedAdmin(req)) return json(res, 401, { success: false, error: "Unauthorized" });
-  const id = req.query?.id;
+  let id = req.query?.id || req.body?.id;
   const body = req.body || {};
-  if (!id) return json(res, 400, { success: false, error: "id query param is required" });
+  if (!id) return json(res, 400, { success: false, error: "id query param or body.id is required" });
 
   const updates = {};
   if (body.status) {
@@ -212,12 +273,15 @@ async function handlePatchDiscrepancy(req, res) {
       return json(res, 400, { success: false, error: `status must be one of: ${[...ALLOWED_DISCREPANCY_STATUS].join(", ")}` });
     }
     updates.status = body.status;
-    if (body.status === "resolved") {
-      updates.resolved_at = new Date().toISOString();
-      updates.resolved_by = body.resolved_by || "discrepancy-api";
-    }
+  } else if (body.resolved === true || body.resolved === "true") {
+    updates.status = "resolved";
+  }
+  if (updates.status === "resolved") {
+    updates.resolved_at = new Date().toISOString();
+    updates.resolved_by = body.resolved_by || "discrepancy-api";
   }
   if (body.reason) updates.reason = body.reason;
+  if (body.note !== undefined && body.note !== null) updates.note = String(body.note);
   if (body.resolved_by && !updates.resolved_by) updates.resolved_by = body.resolved_by;
 
   if (!Object.keys(updates).length) return json(res, 400, { success: false, error: "No valid fields to update" });
@@ -245,7 +309,7 @@ async function handleImportPreview(req, res) {
 
   const preview_rows = [];
   const blocked = [];
-  const discrepancies = [];
+  const discrepancies_list = [];
   let import_ready_count = 0;
   let blocked_count = 0;
   let totalDevices = 0;
@@ -255,16 +319,26 @@ async function handleImportPreview(req, res) {
   previewSource.products.forEach((p, idx) => {
     const row = {
       index: idx,
+      kind: p.product_type === "device" ? "machine" : p.product_type === "scent_pack" ? "scent" : p.product_type || "product",
+      type: p.product_type,
+      name: p.canonical_name,
+      product_name: p.canonical_name,
       canonical_name: p.canonical_name,
       product_type: p.product_type,
       color: p.color || null,
       machine_type: p.machine_type || null,
       pack_size: p.pack_size || null,
       unit_name: p.unit_name || null,
+      quantity: Number(p.counted_quantity || 0),
       counted_quantity: Number(p.counted_quantity || 0),
+      opening_balance: Number(p.counted_quantity || 0),
       flag: p.flag || "ok",
+      flagged: p.flag === "discrepancy" || p.flag === "blocked",
+      blocked: p.flag === "blocked",
+      has_discrepancy: p.flag === "discrepancy",
       aliases: p.aliases || [],
       discrepancy_reason: p.discrepancy_reason || null,
+      note: p.discrepancy_reason || null,
     };
     preview_rows.push(row);
 
@@ -273,7 +347,7 @@ async function handleImportPreview(req, res) {
       blocked_count++;
     } else {
       import_ready_count++;
-      if (row.flag === "discrepancy") discrepancies.push(row.canonical_name);
+      if (row.flag === "discrepancy") discrepancies_list.push(row.canonical_name);
     }
 
     if (row.product_type === "device") totalDevices += row.counted_quantity;
@@ -285,8 +359,10 @@ async function handleImportPreview(req, res) {
 
   return json(res, 200, {
     success: true,
+    preview: preview_rows,
+    items: preview_rows,
     preview_rows,
-    flagged: { blocked, discrepancies },
+    flagged: { blocked, discrepancies: discrepancies_list },
     import_ready_count,
     blocked_count,
     totals: {

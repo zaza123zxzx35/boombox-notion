@@ -22,7 +22,7 @@ function defaultSeedPreview() {
     unit_name: "เครื่อง",
     counted_quantity: 5,
     flag: "discrepancy",
-    discrepancy_reason: "กล่องดำขาด 1 เครื่องจากที่สั่ง 6 ได้ 5 (รวม 200 เม็ดแถมที่ขาดด้วย)",
+    discrepancy_reason: "รับจริง 41 เครื่องรวม, ขายไป 2 เครื่อง, นับจริง 35 เครื่อง; ส่วนต่าง 4 เครื่อง (กล่องดำขาด 1 เครื่อง จากสั่ง 6 ได้ 5 และ เม็ดแถม 200 เม็ด ขาด)",
     aliases: ["กล่องดำ", "regular ดำ", "ดำ"],
   });
 
@@ -47,7 +47,7 @@ function defaultSeedPreview() {
     unit_name: "เครื่อง",
     counted_quantity: 9,
     flag: "discrepancy",
-    discrepancy_reason: "ส่วนต่างเครื่อง 4 เครื่องระหว่างคำนวณ 39 กับนับ 35",
+    discrepancy_reason: "รับจริง 41 เครื่องรวม, ขายไป 2 เครื่อง, นับจริง 35 เครื่อง → ส่วนต่าง 4 เครื่อง; กล่องดำขาด 1 เครื่อง และ เม็ดแถม 200 เม็ด ขาด",
     aliases: ["มินิดำ", "mini ดำ", "mini black"],
   });
 
@@ -60,7 +60,7 @@ function defaultSeedPreview() {
     unit_name: "เครื่อง",
     counted_quantity: 9,
     flag: "discrepancy",
-    discrepancy_reason: "ส่วนต่างเครื่อง 4 เครื่องระหว่างคำนวณ 39 กับนับ 35",
+    discrepancy_reason: "รับจริง 41 เครื่องรวม, ขายไป 2 เครื่อง, นับจริง 35 เครื่อง → ส่วนต่าง 4 เครื่อง; กล่องดำขาด 1 เครื่อง และ เม็ดแถม 200 เม็ด ขาด",
     aliases: ["มินิขาว", "mini ขาว", "mini white"],
   });
 
@@ -180,7 +180,7 @@ function defaultSeedPreview() {
       aliases: ["มิกซ์", "mixed", "mix flavor", "รวมรส", "ผสม"],
       packs: 74,
       flag: "blocked",
-      discrepancy_reason: "74 หน่วยไม่ชัดแยกกลิ่นได้ ต้องแยกย่อยก่อนใช้งาน",
+      discrepancy_reason: "74 หน่วยยังไม่ทราบว่าเป็นจำนวนเม็ดหรือถุง 100 เม็ด; เม็ดสั่งแยก 100 เม็ด รวม 175 ถุง; ขายออกตามข้อมูล 7 ถุง; ห้ามนำเป็น Available Stock อัตโนมัติ — ต้องแยกย่อยและยืนยัน Alias ก่อนใช้งาน (unverified/discrepancy/blocked)",
     },
     {
       name_th: "มะนาว",
