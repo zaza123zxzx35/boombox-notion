@@ -664,6 +664,7 @@ export default async function handler(req, res) {
       .replace(/^\/api\/inventory\.js\/?/, "")
       .replace(/^\[\[\.\.\.path\]\]\/?/, "")
       .replace(/^\[\.\.\.all\]\/?/, "")
+      .replace(/^\[\[\.\.\.inventory\]\]\/?/, "")
       .replace(/^\.\//, "");
     if (path.startsWith("/")) path = path.slice(1);
 
