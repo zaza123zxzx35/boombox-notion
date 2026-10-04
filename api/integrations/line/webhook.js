@@ -196,6 +196,43 @@ async function callOrdersAPI(orderToken, host, payload) {
   }
 }
 
+const ORDER_FAIL_REPLY_TEXT = "ระบบยังยืนยันคำสั่งซื้อไม่ได้ กรุณาลองใหม่หรือติดต่อแอดมิน";
+
+function classifyOrderResult(orderRes) {
+  const httpStatus = Number(orderRes?.status) || 0;
+  const body = orderRes?.body && typeof orderRes.body === "object" ? orderRes.body : null;
+  const bodySuccess = body?.success === true;
+  const isDuplicate = bodySuccess && body?.duplicate === true;
+  const orderObj = body?.order && typeof body.order === "object" ? body.order : null;
+  const orderNumber = orderObj?.order_number || orderObj?.orderNumber || null;
+  const orderId = orderObj?.id || null;
+  if (httpStatus === 201 && bodySuccess && !isDuplicate && orderNumber) {
+    return {
+      kind: "created",
+      orderNumber,
+      orderId,
+      summaryInc: { orderCreated: 1, orderDuplicated: 0, orderFailed: 0 },
+      nextState: "confirmed",
+    };
+  }
+  if (isDuplicate && orderNumber) {
+    return {
+      kind: "duplicated",
+      orderNumber,
+      orderId,
+      summaryInc: { orderCreated: 0, orderDuplicated: 1, orderFailed: 0 },
+      nextState: "confirmed",
+    };
+  }
+  return {
+    kind: "failed",
+    orderNumber: null,
+    orderId: null,
+    summaryInc: { orderCreated: 0, orderDuplicated: 0, orderFailed: 1 },
+    nextState: "awaiting_confirmation",
+  };
+}
+
 async function updateEventRow(eventRowId, patch) {
   if (!eventRowId) return;
   await supabase(`line_webhook_events?id=eq.${encodeURIComponent(eventRowId)}`, {
@@ -398,57 +435,83 @@ function collectCustomerPrompt(draft) {
 function parseCustomerFieldsInto(draft, text) {
   const next = JSON.parse(JSON.stringify(draft || {}));
   next.customer = next.customer || {};
-  const name = String(next.customer.displayName || next.customer.name || "").trim();
-  const phone = String(next.customer.phone || "").trim();
-  const addr = String(next.customer.shippingAddress || next.customer.address || "").trim();
+  const hasName = !!(String(next.customer.displayName || next.customer.name || "").trim());
+  const hasPhone = isThaiPhone(next.customer.phone);
+  const hasAddr = !!(String(next.customer.shippingAddress || next.customer.address || "").trim());
+  const ADDR_MARKERS = ["หมู่","หม.","หมู่บ้าน","ซอย","ซ.","ถนน","ถ.","ตำบล","ต.","แขวง","อำเภอ","อ.","เขต","จังหวัด","จ.","กรุงเทพ","กทม","รหัสไปรษณีย์","บ้านเลขที่","บ.เลขที่","บ้านเลข","เลขที่"];
+  function hasAnyAddrMarker(s) { return ADDR_MARKERS.some((m) => String(s || "").includes(m)); }
+  function hasDigitsLen2(s) { const d = String(s || "").replace(/[^\d]/g, ""); return d.length >= 2; }
+
   const phoneFound = extractThaiPhone(text);
-  const withoutPhone = phoneFound ? text.replace(phoneFound, " ") : text;
-  const tokensSplit = withoutPhone.split(/[,，;；\n\r\t]+/).map((x) => x.trim()).filter(Boolean);
-  const ADDR_MARKERS = ["หมู่","หมู่บ้าน","ซอย","ถนน","ตำบล","แขวง","อำเภอ","เขต","จังหวัด","กรุงเทพ","รหัสไปรษณีย์","บ้านเลขที่","ซอย","ถนน"];
-  let chunks = [];
-  function smartSplitIntoChunks(blob) {
-    const out = [];
-    const spaceSplit = normalizeText(blob).split(/\s+/).filter(Boolean);
-    if (spaceSplit.length === 0) return out;
-    if (spaceSplit.length === 1) { out.push(spaceSplit[0]); return out; }
+  if (phoneFound && !hasPhone) next.customer.phone = phoneFound;
+  const restText = phoneFound ? text.replace(phoneFound, " ") : text;
+  const restNorm = normalizeText(restText);
+  const missing = customerMissingFields(next);
+
+  if (missing.length === 1 && restNorm) {
+    const need = missing[0];
+    if (need === "phone") {
+      const d = restNorm.replace(/\D/g, "");
+      if (isThaiPhone(d)) {
+        next.customer.phone = d;
+        return next;
+      }
+      return next;
+    }
+    const hasPhoneHere = !!phoneFound || isThaiPhone(restNorm);
+    if (need === "name" && !hasPhoneHere && !hasAnyAddrMarker(restNorm) && !restNorm.split(/\s+/).some(hasDigitsLen2)) {
+      next.customer.displayName = restNorm;
+      next.customer.name = restNorm;
+      return next;
+    }
+    if (need === "address" && restNorm.length >= 5) {
+      next.customer.shippingAddress = restNorm;
+      next.customer.address = restNorm;
+      return next;
+    }
+  }
+
+  const tokens = restNorm.split(/[,，;；\n\r\t]+/).map((s) => s.trim()).filter(Boolean);
+  const words = restNorm.split(/\s+/).filter(Boolean);
+  let nameCandidate = null;
+  let addrCandidate = null;
+
+  if (tokens.length >= 2) {
+    nameCandidate = tokens[0];
+    addrCandidate = tokens.slice(1).join(" ");
+  } else if (words.length >= 2) {
     let splitIdx = -1;
-    for (let i = 1; i < spaceSplit.length; i++) {
-      const t = spaceSplit[i];
-      if (/\d/.test(t) && t.length >= 2) { splitIdx = i; break; }
-      if (ADDR_MARKERS.some((m) => t.includes(m))) { splitIdx = i; break; }
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i];
+      if (hasAnyAddrMarker(w) || hasDigitsLen2(w)) { splitIdx = i; break; }
     }
-    if (splitIdx <= 0) splitIdx = Math.min(2, spaceSplit.length - 1);
-    const firstPiece = spaceSplit.slice(0, splitIdx).join(" ");
-    const addrPiece = spaceSplit.slice(splitIdx).join(" ");
-    if (firstPiece) out.push(firstPiece);
-    if (addrPiece) out.push(addrPiece);
-    return out;
-  }
-  if (tokensSplit.length >= 2) {
-    chunks = tokensSplit;
-  } else if (tokensSplit.length === 1) {
-    const one = tokensSplit[0];
-    const spacePieces = normalizeText(one).split(/\s+/).filter(Boolean);
-    if (spacePieces.length <= 1) chunks = [one];
-    else chunks = smartSplitIntoChunks(one);
-  } else {
-    chunks = smartSplitIntoChunks(withoutPhone);
-  }
-  if (phoneFound && !isThaiPhone(phone)) next.customer.phone = phoneFound;
-  if (!name) {
-    const candidateName = (chunks[0] || "").trim();
-    if (candidateName && candidateName.length >= 2 && candidateName.length <= 80) {
-      next.customer.displayName = candidateName;
-      next.customer.name = candidateName;
-      chunks.shift();
+    if (splitIdx < 0) {
+      if (!hasName && !hasPhone && !hasAddr) {
+        nameCandidate = words.join(" ");
+      } else if (hasName && !hasAddr) {
+        addrCandidate = words.join(" ");
+      } else {
+        splitIdx = Math.min(2, words.length - 1);
+        nameCandidate = words.slice(0, splitIdx).join(" ");
+        addrCandidate = words.slice(splitIdx).join(" ");
+      }
+    } else {
+      nameCandidate = words.slice(0, splitIdx).join(" ");
+      addrCandidate = words.slice(splitIdx).join(" ");
     }
+  } else if (words.length === 1) {
+    const w = words[0];
+    if (!hasName) nameCandidate = w;
+    else if (!hasAddr) addrCandidate = w;
   }
-  if (!addr) {
-    const leftover = chunks.join(" ").trim();
-    if (leftover && leftover.length >= 5 && leftover.length <= 400) {
-      next.customer.shippingAddress = leftover;
-      next.customer.address = leftover;
-    }
+
+  if (!hasName && nameCandidate && nameCandidate.length >= 2 && nameCandidate.length <= 80) {
+    next.customer.displayName = nameCandidate;
+    next.customer.name = nameCandidate;
+  }
+  if (!hasAddr && addrCandidate && addrCandidate.length >= 5 && addrCandidate.length <= 400) {
+    next.customer.shippingAddress = addrCandidate;
+    next.customer.address = addrCandidate;
   }
   return next;
 }
@@ -715,6 +778,8 @@ function reduceConversation(state, draft, rawText, context) {
   };
 }
 
+export const _lineOrderClassify = { classifyOrderResult, ORDER_FAIL_REPLY_TEXT };
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -775,7 +840,7 @@ export default async function handler(req, res) {
   }
   const reqHost = String(req.headers?.host || "boombox-notion.vercel.app").replace(/\/$/, "");
 
-  const summary = { processed: 0, duplicates: 0 };
+  const summary = { processed: 0, duplicates: 0, orderCreated: 0, orderDuplicated: 0, orderFailed: 0 };
 
   for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
     const ev = events[eventIndex];
@@ -825,27 +890,38 @@ export default async function handler(req, res) {
     let convoDraft = { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE };
     try {
       if (lineUserId) {
-        const upsert = await supabase("line_conversations", {
-          method: "POST",
-          headers: {
-            Prefer: "return=representation, resolution=merge-duplicates",
-          },
-          body: JSON.stringify({
-            line_user_id: lineUserId,
-            state: "new",
-            draft: { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE },
-            last_event_id: eventRowId,
-            last_message_at: new Date().toISOString(),
-            expires_at: new Date(Date.now() + 86400000).toISOString(),
-          }),
-        });
-        if (upsert && upsert[0]) {
-          conversationRowId = upsert[0].id;
-          if (upsert[0].state && ALLOWED_STATES.has(String(upsert[0].state))) {
-            convoState = String(upsert[0].state);
+        let existing = null;
+        try {
+          const got = await supabase(`line_conversations?line_user_id=eq.${encodeURIComponent(lineUserId)}&select=id,state,draft&limit=1`, { method: "GET" });
+          if (Array.isArray(got) && got[0]) existing = got[0];
+        } catch (_e) { existing = null; }
+
+        let row = null;
+        if (existing && existing.id) {
+          row = existing;
+        } else {
+          const inserted = await supabase("line_conversations", {
+            method: "POST",
+            headers: { Prefer: "return=representation" },
+            body: JSON.stringify({
+              line_user_id: lineUserId,
+              state: "new",
+              draft: { package: { code: null, name: null, price: null }, scents: [], deviceColor: null, customer: {}, shippingFee: DEFAULT_SHIPPING_FEE },
+              last_event_id: eventRowId,
+              last_message_at: new Date().toISOString(),
+              expires_at: new Date(Date.now() + 86400000).toISOString(),
+            }),
+          });
+          if (Array.isArray(inserted) && inserted[0]) row = inserted[0];
+        }
+
+        if (row) {
+          conversationRowId = row.id;
+          if (row.state && ALLOWED_STATES.has(String(row.state))) {
+            convoState = String(row.state);
           }
-          if (upsert[0].draft && typeof upsert[0].draft === "object" && !Array.isArray(upsert[0].draft)) {
-            const d = upsert[0].draft;
+          if (row.draft && typeof row.draft === "object" && !Array.isArray(row.draft)) {
+            const d = row.draft;
             convoDraft = {
               package: d.package && typeof d.package === "object" ? {
                 code: d.package.code || null,
@@ -869,7 +945,7 @@ export default async function handler(req, res) {
       }
     } catch (e) {
       const safeErr = String(e?.message || "").slice(0, 120);
-      console.error("LINE webhook: supabase upsert convo error", safeErr.length ? safeErr : "unknown");
+      console.error("LINE webhook: supabase load/insert convo error", safeErr.length ? safeErr : "unknown");
     }
 
     let replyText = null;
@@ -932,16 +1008,18 @@ export default async function handler(req, res) {
           nextState = "awaiting_confirmation";
         } else {
           const orderRes = await callOrdersAPI(lineOrderToken, reqHost, payload);
-          const ok = orderRes.ok && orderRes.body?.success === true;
-          const orderObj = ok ? orderRes.body?.order : null;
-          const orderNumber = orderObj?.order_number;
-          if (ok && orderNumber) {
-            nextDraft.orderId = orderObj.id || null;
-            nextDraft.orderNumber = orderNumber;
+          const classified = classifyOrderResult(orderRes);
+          summary.orderCreated += classified.summaryInc.orderCreated | 0;
+          summary.orderDuplicated += classified.summaryInc.orderDuplicated | 0;
+          summary.orderFailed += classified.summaryInc.orderFailed | 0;
+          nextState = classified.nextState;
+          if (classified.kind === "created") {
+            nextDraft.orderId = classified.orderId || null;
+            nextDraft.orderNumber = classified.orderNumber;
             nextState = "confirmed";
             replyText = [
               "✅ สั่งซื้อสำเร็จครับ",
-              `หมายเลขออเดอร์: ${orderNumber}`,
+              `หมายเลขออเดอร์: ${classified.orderNumber}`,
               `Set ${code} (${pkg.name}) ฿${pkg.price + Number(payload.shippingFee || 0)}`,
               `สี: ${nextDraft.deviceColor}`,
               `ชื่อ: ${cust.displayName || cust.name || "-"}`,
@@ -950,10 +1028,18 @@ export default async function handler(req, res) {
               `สถานะเริ่มต้น: รอยืนยัน (แอดมินจะตรวจสอบและติดต่อให้ครับ)`,
               `สามารถตรวจสอบสถานะใน Dashboard ได้เลยครับ`,
             ].join("\n");
+          } else if (classified.kind === "duplicated") {
+            nextDraft.orderId = classified.orderId || null;
+            nextDraft.orderNumber = classified.orderNumber;
+            nextState = "confirmed";
+            replyText = [
+              "📝 ออเดอร์นี้ถูกบันทึกแล้วครับ",
+              `หมายเลขออเดอร์: ${classified.orderNumber}`,
+              "(ระบบพบว่าข้อความนี้เคยยืนยันแล้ว ไม่ได้สร้างออเดอร์ใหม่)",
+            ].join("\n");
           } else {
             nextState = "awaiting_confirmation";
-            const safeErr = String(orderRes?.body?.error || orderRes?.error || "").slice(0, 60);
-            replyText = "ขออภัยครับ ระบบสร้างออเดอร์ไม่สำเร็จในขณะนี้ โปรดลองอีกครั้งภายหลังครับ" + (safeErr ? ` (${safeErr})` : "");
+            replyText = ORDER_FAIL_REPLY_TEXT;
           }
         }
       }
@@ -1013,10 +1099,14 @@ export default async function handler(req, res) {
     }
   }
 
+  const anyOrderFailed = summary.orderFailed > 0;
   return json(res, 200, {
-    success: true,
+    success: !anyOrderFailed,
     processed: summary.processed,
     duplicates: summary.duplicates,
+    orderCreated: summary.orderCreated,
+    orderDuplicated: summary.orderDuplicated,
+    orderFailed: anyOrderFailed,
     total: events.length,
   });
 }
