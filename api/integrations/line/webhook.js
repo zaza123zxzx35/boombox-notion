@@ -841,6 +841,8 @@ export default async function handler(req, res) {
   const reqHost = String(req.headers?.host || "boombox-notion.vercel.app").replace(/\/$/, "");
 
   const summary = { processed: 0, duplicates: 0, orderCreated: 0, orderDuplicated: 0, orderFailed: 0 };
+  const debug = [];
+  let lastOrderDebug = null;
 
   for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
     const ev = events[eventIndex];
@@ -1013,6 +1015,16 @@ export default async function handler(req, res) {
           summary.orderDuplicated += classified.summaryInc.orderDuplicated | 0;
           summary.orderFailed += classified.summaryInc.orderFailed | 0;
           nextState = classified.nextState;
+          lastOrderDebug = {
+            ok: orderRes.ok,
+            status: orderRes.status || null,
+            err: orderRes.error || null,
+            body: orderRes.body ? (JSON.stringify(orderRes.body).slice(0, 500)) : null,
+            httpBody: (orderRes && orderRes.body && orderRes.body.body && typeof orderRes.body.body === 'string') ? orderRes.body.body.slice(0,200) : null,
+            classified: classified.kind + ":" + classified.orderNumber,
+            tokenLen: lineOrderToken ? lineOrderToken.length : 0,
+            host: reqHost,
+          };
           if (classified.kind === "created") {
             nextDraft.orderId = classified.orderId || null;
             nextDraft.orderNumber = classified.orderNumber;
@@ -1108,5 +1120,7 @@ export default async function handler(req, res) {
     orderDuplicated: summary.orderDuplicated,
     orderFailed: anyOrderFailed,
     total: events.length,
+    debug: debug.length ? debug : undefined,
+    lastOrderDebug: lastOrderDebug || undefined,
   });
 }
