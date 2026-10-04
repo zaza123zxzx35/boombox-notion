@@ -1,0 +1,7 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/api/inventory", "destination": "/api/inventory/index.js" },
+    { "source": "/api/inventory/:path*", "destination": "/api/inventory/index.js" }
+  ]
+}
