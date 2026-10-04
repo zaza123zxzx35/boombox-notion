@@ -178,7 +178,7 @@ export default async function handler(req, res) {
 
   const destination = String(body?.destination || "");
   const events = Array.isArray(body?.events) ? body.events : null;
-  if (!destination || !events || events.length < 1 || events.length > 100) {
+  if (!destination || !events || events.length > 100) {
     return json(res, 400, { success: false, error: "Invalid payload: destination + events array required" });
   }
 
