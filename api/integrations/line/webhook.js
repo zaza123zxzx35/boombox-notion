@@ -16,9 +16,24 @@ const PACKAGES = {
 };
 const PACKAGE_BEADS = { A: 100, B: 200, C: 400, D: 600 };
 const FLAVORS = new Set([
-  "สตรอว์เบอร์รี", "องุ่น", "แอปเปิล", "แตงโม", "พีช", "มะม่วง", "ลิ้นจี่",
-  "บลูเบอร์รี", "เชอร์รี", "สับปะรด", "เลมอน", "ส้ม", "มะพร้าว", "กล้วย",
-  "กีวี", "มิ้นท์เย็น", "สเปียร์มิ้นท์", "เปปเปอร์มิ้นท์", "เมนทอล",
+  "มิ้นต์เย็น",
+  "องุ่นหวาน",
+  "แบล็คเบอร์รี่",
+  "กล้วยนม",
+  "ลิ้นจี่",
+  "ไอศกรีม",
+  "แอปเปิ้ลเขียว",
+  "บลูเบอร์รี่",
+  "แตงโม",
+  "ส้มซิตรัส",
+  "สมุนไพรจีน",
+  "โคล่า",
+  "หอมหมื่นลี้",
+  "แคนตาลูป",
+  "รวมกลิ่น",
+  "เลมอน",
+  "องุ่นเย็น",
+  "สตรอเบอร์รี่",
 ]);
 const FLAVOR_LIST = Array.from(FLAVORS);
 const ALLOWED_STATES = new Set([
@@ -411,7 +426,7 @@ function catalogPriceTable() {
     `  Set B: 200 เม็ด ราคา ฿389 (เลือก 2 กลิ่น)`,
     `  Set C: 400 เม็ด ราคา ฿499 (เลือก 4 กลิ่น)`,
     `  Set D: 600 เม็ด ราคา ฿649 (เลือก 6 กลิ่น)`,
-    `🌸 รายการกลิ่นมาตรฐาน 19 รายการ:`,
+    `🌸 รายการกลิ่นมาตรฐาน 18 รายการ:`,
     `  ${FLAVOR_LIST.join(" / ")}`,
     ``,
     `พิมพ์ A / B / C / D เพื่อเริ่มเลือกชุดครับ`,
@@ -422,7 +437,7 @@ function helpChooseScent(code) {
   const need = scentCountNeeded(code);
   return [
     `กรุณาเลือกกลิ่นทีละ 1 รายการต่อข้อความครับ`,
-    `🌸 รายการกลิ่น 19 รายการ:`,
+    `🌸 รายการกลิ่น 18 รายการ:`,
     FLAVOR_LIST.join(", "),
     ``,
     `จำเป็นต้องเลือกทั้งหมด ${need} กลิ่น (ห้ามซ้ำ ห้ามเลือกนอกรายการ)`,
@@ -712,7 +727,7 @@ function reduceConversation(state, draft, rawText, context) {
       return {
         nextState: "collecting_scents",
         nextDraft: next,
-        replyText: `❌ ไม่มีกลิ่น "${invalidName}" ในรายการมาตรฐาน 19 รายการครับ\n\n${helpChooseScent(code)}\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นครับ`,
+        replyText: `❌ ไม่มีกลิ่น "${invalidName}" ในรายการมาตรฐาน 18 รายการครับ\n\n${helpChooseScent(code)}\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นครับ`,
         summaryShown: false,
       };
     }
