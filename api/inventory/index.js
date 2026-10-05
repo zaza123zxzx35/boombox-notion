@@ -838,7 +838,7 @@ async function handleSyncOrderStatus(req, res) {
     return json(res, 200, modeAResult);
   }
 
-  if (new_status === "cancelled" && old_status === "confirmed") {
+  if (new_status === "cancelled") {
     if (existingReturn.length > 0) {
       return json(res, 200, { success: true, skipped: true, reason: "return_movements_already_exist", order });
     }
@@ -864,11 +864,8 @@ async function handleSyncOrderStatus(req, res) {
       });
       movements.push(ins?.[0] || mv);
     }
-    return json(res, 200, { success: true, transition: "confirmed→cancelled", movements_created: movements.length, movements });
-  }
-
-  if (new_status === "cancelled" && (!old_status || old_status === "pending_confirmation")) {
-    return json(res, 200, { success: true, skipped: true, no_movement: true, transition: "pending→cancelled", order });
+    const transitionLabel = (old_status === "confirmed") ? "confirmed→cancelled" : (old_status || "unknown") + "→cancelled";
+    return json(res, 200, { success: true, transition: transitionLabel, movements_created: movements.length, movements });
   }
 
   const otherTransitions = new Set(["packing", "shipped", "completed"]);
