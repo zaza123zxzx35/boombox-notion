@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS stock_ledger (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS stock_ledger_line_order_idempotent_partial
-  ON stock_ledger (reference_id, movement_type)
+  ON stock_ledger (reference_id, product_id, movement_type)
   WHERE reference_type = 'line_order';
 
 CREATE TABLE IF NOT EXISTS discrepancies (
