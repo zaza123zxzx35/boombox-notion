@@ -200,7 +200,10 @@ const ORDER_FAIL_REPLY_TEXT = "ระบบยังยืนยันคำส�
 
 function classifyOrderResult(orderRes) {
   const httpStatus = Number(orderRes?.status) || 0;
-  const body = orderRes?.body && typeof orderRes.body === "object" ? orderRes.body : null;
+  let body = orderRes?.body && typeof orderRes.body === "object" ? orderRes.body : null;
+  if (body && typeof body.raw === "string") {
+    try { const inner = JSON.parse(body.raw); if (inner && typeof inner === "object") body = inner; } catch {}
+  }
   const bodySuccess = body?.success === true;
   const isDuplicate = bodySuccess && body?.duplicate === true;
   const orderObj = body?.order && typeof body.order === "object" ? body.order : null;
@@ -1058,53 +1061,50 @@ export default async function handler(req, res) {
             const inventorySyncKind = classified.kind;
             const isConfirmedSync = inventorySyncKind === "created" || inventorySyncKind === "duplicated";
             const adminSyncToken = String(process.env.BACKOFFICE_ADMIN_TOKEN || "");
-            if (isConfirmedSync && adminSyncToken && reqHost) {
-              const pkgSyncCode = nextDraft.package?.code || code || "A";
-              const deviceSyncColor = nextDraft.deviceColor || null;
-              const scentSyncList = Array.isArray(scents) ? scents.slice() : [];
-              const syncSourceOrderId = payload.idempotencyKey || `line-order:${payload.lineMessageId || Date.now()}`;
+            if (isConfirmedSync && adminSyncToken && reqHost && classified.orderId) {
+              const orderSyncId = classified.orderId;
               const syncOrderNumber = classified.orderNumber || null;
-              const syncLineMsgId = payload.lineMessageId || null;
 
-              const syncItems = [];
-              if (deviceSyncColor) {
-                syncItems.push({ product_type: "device", device_color: deviceSyncColor, package_code: pkgSyncCode, qty: 1 });
-              }
-              for (const flav of scentSyncList) {
-                if (!flav) continue;
-                syncItems.push({ product_type: "scent_pack", scent_name: String(flav), qty: 1 });
-              }
+              const syncUrl = `https://${reqHost}/api/inventory/sync-order-status`;
+              const patchStatusUrl = `https://${reqHost}/api/integrations/line/orders?id=${encodeURIComponent(orderSyncId)}`;
 
-              if (syncItems.length > 0) {
-                const syncPayload = {
-                  source_order_id: syncSourceOrderId,
-                  order_number: syncOrderNumber,
-                  line_message_id: syncLineMsgId,
-                  items: syncItems,
-                };
-                const syncUrl = `https://${reqHost}/api/inventory/sync-order-status`;
-                const fireInventorySync = async () => {
+              const fireInventorySync = async () => {
+                try {
+                  await fetch(syncUrl, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${adminSyncToken}`,
+                      "X-Admin-Token": adminSyncToken,
+                    },
+                    body: JSON.stringify({
+                      order_id: orderSyncId,
+                      order_number: syncOrderNumber,
+                      old_status: "pending_confirmation",
+                      new_status: "confirmed",
+                    }),
+                    signal: typeof AbortController !== "undefined" ? (new AbortController().signal) : undefined,
+                  });
                   try {
-                    await fetch(syncUrl, {
-                      method: "POST",
+                    await fetch(patchStatusUrl, {
+                      method: "PATCH",
                       headers: {
                         "Content-Type": "application/json",
                         "Authorization": `Bearer ${adminSyncToken}`,
                         "X-Admin-Token": adminSyncToken,
                       },
-                      body: JSON.stringify(syncPayload),
-                      signal: typeof AbortController !== "undefined" ? (new AbortController().signal) : undefined,
+                      body: JSON.stringify({ status: "confirmed" }),
                     });
-                  } catch (fireErr) {
-                    const safeFire = String(fireErr?.message || "").slice(0, 200);
-                    console.error("LINE webhook: inventory sync fire error", safeFire || "unknown");
-                  }
-                };
-                if (typeof setTimeout === "function") {
-                  setTimeout(fireInventorySync, 1);
-                } else {
-                  Promise.resolve().then(fireInventorySync).catch(() => {});
+                  } catch (_patchErr) {}
+                } catch (fireErr) {
+                  const safeFire = String(fireErr?.message || "").slice(0, 200);
+                  console.error("LINE webhook: inventory sync fire error", safeFire || "unknown");
                 }
+              };
+              if (typeof setTimeout === "function") {
+                setTimeout(fireInventorySync, 1);
+              } else {
+                Promise.resolve().then(fireInventorySync).catch(() => {});
               }
             }
           } catch (_invSyncWrap) {}
