@@ -401,11 +401,31 @@ async function handleImportCommit(req, res) {
 
   const results = [];
   for (const item of items) {
+    const canonClean = (item.canonical_name || "product")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}_-]/gu, "")
+      .slice(0, 16) || "product";
+    const typeCode =
+      item.product_type === "device"
+        ? (item.machine_type === "mini" ? "MINI" : item.machine_type === "vip" ? "VIP" : "STD")
+        : item.product_type === "scent_pack"
+        ? "SCN"
+        : (item.product_type || "PRD").toString().toUpperCase().slice(0, 3);
+    const colorPart = item.color
+      ? ("-" +
+         String(item.color)
+           .normalize("NFKD")
+           .replace(/[\u0300-\u036f]/g, "")
+           .replace(/[^\p{L}\p{N}_-]/gu, "")
+           .slice(0, 8)
+           .toUpperCase())
+      : "";
     const productPayload = {
       canonical_name: item.canonical_name,
-      display_name: item.canonical_name,
+      display_name: item.display_name || item.canonical_name,
       product_type: item.product_type,
-      sku: `SKU-${(item.canonical_name||"").replace(/[^A-Za-z0-9ก-ฮ]/g,"").slice(0,16)}-${Math.floor(Math.random()*9000+1000)}`,
+      sku: `${typeCode}-${canonClean}${colorPart}`.toUpperCase(),
       color: item.color || null,
       pack_size: item.pack_size || 1,
       unit_name: item.unit_name || "unit",
