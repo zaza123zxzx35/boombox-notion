@@ -16,8 +16,7 @@ const PACKAGES = {
 };
 const PACKAGE_BEADS = { A: 100, B: 200, C: 400, D: 600 };
 const FLAVORS = new Set([
-  "มิ้นต์เย็น",
-  "ซีโร่ดีกรีมิ้นท์",
+  "มิ้นต์",
   "องุ่นหวาน",
   "แบล็คเบอร์รี่",
   "กล้วยนม",
@@ -427,7 +426,7 @@ function catalogPriceTable() {
     `  Set B: 200 เม็ด ราคา ฿389 (เลือก 2 กลิ่น)`,
     `  Set C: 400 เม็ด ราคา ฿499 (เลือก 4 กลิ่น)`,
     `  Set D: 600 เม็ด ราคา ฿649 (เลือก 6 กลิ่น)`,
-    `🌸 รายการกลิ่นมาตรฐาน 19 รายการ:`,
+    `🌸 รายการกลิ่นมาตรฐาน 18 รายการ:`,
     `  ${FLAVOR_LIST.join(" / ")}`,
     ``,
     `พิมพ์ A / B / C / D เพื่อเริ่มเลือกชุดครับ`,
@@ -438,7 +437,7 @@ function helpChooseScent(code) {
   const need = scentCountNeeded(code);
   return [
     `กรุณาเลือกกลิ่นทีละ 1 รายการต่อข้อความครับ`,
-    `🌸 รายการกลิ่น 19 รายการ:`,
+    `🌸 รายการกลิ่น 18 รายการ:`,
     FLAVOR_LIST.join(", "),
     ``,
     `จำเป็นต้องเลือกทั้งหมด ${need} กลิ่น (ห้ามซ้ำ ห้ามเลือกนอกรายการ)`,
@@ -728,7 +727,7 @@ function reduceConversation(state, draft, rawText, context) {
       return {
         nextState: "collecting_scents",
         nextDraft: next,
-        replyText: `❌ ไม่มีกลิ่น "${invalidName}" ในรายการมาตรฐาน 19 รายการครับ\n\n${helpChooseScent(code)}\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นครับ`,
+        replyText: `❌ ไม่มีกลิ่น "${invalidName}" ในรายการมาตรฐาน 18 รายการครับ\n\n${helpChooseScent(code)}\n\nตอนนี้ ${next.scents.length}/${need} กลิ่นครับ`,
         summaryShown: false,
       };
     }

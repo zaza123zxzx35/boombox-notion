@@ -66,20 +66,12 @@ function defaultSeedPreview() {
 
   const scentPacks = [
     {
-      name_th: "มิ้นต์เย็น",
-      name_zh: "黑冰薄荷",
-      aliases: ["แบล็คไอซ์มิ้นท์", "บล็อกไอซ์มิ้น", "Black Ice Mint", "มิ้นดำ", "มิ้นเย็นสุด", "สเปียร์มิ้นท์", "เปปเปอร์มิ้นท์", "เมนทอล"],
-      packs: 10,
+      name_th: "มิ้นต์",
+      name_zh: "黑冰薄荷 / 零度薄荷",
+      aliases: ["มิ้นต์เย็น", "แบล็คไอซ์มิ้นท์", "บล็อกไอซ์มิ้น", "Black Ice Mint", "零度薄荷", "ซีโร่ดีกรีมิ้นท์", "Zero Degree Mint", "zero mint", "ซีโร่ดีกรี", "มิ้นศูนย์องศา", "มิ้นดำ", "มิ้นเย็นสุด", "สเปียร์มิ้นท์", "เปปเปอร์มิ้นท์", "เมนทอล"],
+      packs: 24,
       flag: "discrepancy",
-      discrepancy_reason: "แยกจาก Zero Degree Mint ตาม SKU ที่สั่งจริง; ยอดนับจริงรวมมิ้นต์ 24 ถุง ขณะที่ยอดสั่งรวม 25 ถุง ต้องตรวจส่วนต่าง 1 ถุง",
-    },
-    {
-      name_th: "ซีโร่ดีกรีมิ้นท์",
-      name_zh: "零度薄荷",
-      aliases: ["Zero Degree Mint", "zero mint", "ซีโร่ดีกรี", "มิ้นศูนย์องศา"],
-      packs: 15,
-      flag: "discrepancy",
-      discrepancy_reason: "แยกจาก Black Ice Mint ตาม SKU ที่สั่งจริง; ยอดนับจริงรวมมิ้นต์ 24 ถุง ขณะที่ยอดสั่งรวม 25 ถุง ต้องตรวจส่วนต่าง 1 ถุง",
+      discrepancy_reason: "รวม Black Ice Mint และ Zero Degree Mint เป็น SKU มิ้นต์เดียว; ยอดสั่งรวม 25 ถุง แต่นับจริงรวม 24 ถุง ต้องตรวจส่วนต่าง 1 ถุง",
     },
     {
       name_th: "องุ่นหวาน",
