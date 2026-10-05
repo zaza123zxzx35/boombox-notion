@@ -144,13 +144,19 @@ async function handlePostLedger(req, res) {
   if (body.movement_type === undefined && kind) movement_type = (kind === "purchase" || kind === "in") ? "purchase" : (kind === "sale" || kind === "out") ? "sale" : "adjustment";
 
   if (!ALLOWED_MOVEMENTS.has(movement_type)) return json(res, 400, { success: false, error: `movement_type must be one of: ${[...ALLOWED_MOVEMENTS].join(", ")}` });
-  if (body.reference_type && !ALLOWED_REFERENCE_TYPES.has(body.reference_type)) return json(res, 400, { success: false, error: `reference_type must be one of: ${[...ALLOWED_REFERENCE_TYPES].join(", ")}` });
+  if (body.reference_type && !ALLOWED_REFERENCE_TYPES.has(body.reference_type)) return json(res, 400, { success: false, error: `reference_type must be one of: ${ALLOWED_REFERENCE_TYPES}` });
   if (movement_type === "opening_balance") return json(res, 400, { success: false, error: "opening_balance must be set via import/commit, not direct ledger" });
 
+  let packMul = 1;
+  try {
+    const prodRows = await supabase(`products?select=product_type,pack_size&id=eq.${encodeURIComponent(body.product_id)}&limit=1`, { method: "GET" });
+    if (prodRows?.[0]?.product_type === "scent_pack") packMul = Number(prodRows[0].pack_size) || 100;
+  } catch (_) {}
+
   const signedDelta = (typeof body.quantity_delta === "number") ? Number(body.quantity_delta)
-    : (movement_type === "purchase" || movement_type === "return" || (movement_type === "adjustment" && kind === "in" || kind === "purchase" || body.kind === "in"))
-      ? Math.abs(qtyRaw)
-      : -1 * Math.abs(qtyRaw);
+    : (movement_type === "purchase" || movement_type === "return" || (movement_type === "adjustment" && (kind === "in" || kind === "purchase" || body.kind === "in")))
+      ? Math.abs(qtyRaw) * packMul
+      : -1 * Math.abs(qtyRaw) * packMul;
 
   if (signedDelta < 0) {
     const balRows = await supabase(`inventory_balances?select=*&product_id=eq.${encodeURIComponent(body.product_id)}&limit=1`, { method: "GET" });
@@ -203,9 +209,17 @@ async function handleStocktake(req, res) {
   for (const item of items) {
     if (!item.product_id || typeof item.counted_quantity !== "number") continue;
 
+    let packMul = 1;
+    try {
+      const prodRows = await supabase(`products?select=product_type,pack_size&id=eq.${encodeURIComponent(item.product_id)}&limit=1`, { method: "GET" });
+      if (prodRows?.[0]?.product_type === "scent_pack") packMul = Number(prodRows[0].pack_size) || 100;
+    } catch (_) {}
+
     const balRows = await supabase(`inventory_balances?select=*&product_id=eq.${encodeURIComponent(item.product_id)}&limit=1`, { method: "GET" });
     const onHand = Number(balRows?.[0]?.on_hand || 0);
-    const diff = Number(item.counted_quantity) - onHand;
+    const countedAsBeads = Number(item.counted_quantity) * packMul;
+    const diff = countedAsBeads - onHand;
+    results.push({ product_id: item.product_id, on_hand_before: onHand, counted: countedAsBeads, diff });
 
     let movement = null;
     if (diff !== 0) {
@@ -215,8 +229,8 @@ async function handleStocktake(req, res) {
         quantity_delta: diff,
         reference_type: "stocktake",
         reference_id: stocktakeRef,
-        reason: item.reason || item.note || `Stocktake diff: counted=${item.counted_quantity}, was=${onHand}`,
-        note: item.note || `Stocktake diff: counted=${item.counted_quantity}, was=${onHand}`,
+        reason: item.reason || item.note || `Stocktake diff: counted=${countedAsBeads}, was=${onHand}`,
+        note: item.note || `Stocktake diff: user-input=${item.counted_quantity} units, beads_multiplier=${packMul}: counted=${countedAsBeads}, was=${onHand}`,
         created_by: createdBy,
       };
       const inserted = await supabase("stock_ledger", {
@@ -401,14 +415,34 @@ async function handleImportCommit(req, res) {
 
   const results = [];
   for (const item of items) {
+    const canonClean = (item.canonical_name || "product")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\p{L}\p{N}_-]/gu, "")
+      .slice(0, 16) || "product";
+    const typeCode =
+      item.product_type === "device"
+        ? (item.machine_type === "mini" ? "MINI" : item.machine_type === "vip" ? "VIP" : "STD")
+        : item.product_type === "scent_pack"
+        ? "SCN"
+        : (item.product_type || "PRD").toString().toUpperCase().slice(0, 3);
+    const colorPart = item.color
+      ? ("-" +
+         String(item.color)
+           .normalize("NFKD")
+           .replace(/[\u0300-\u036f]/g, "")
+           .replace(/[^\p{L}\p{N}_-]/gu, "")
+           .slice(0, 8)
+           .toUpperCase())
+      : "";
     const productPayload = {
       canonical_name: item.canonical_name,
-      display_name: item.canonical_name,
+      display_name: item.display_name || item.canonical_name,
       product_type: item.product_type,
-      sku: `SKU-${(item.canonical_name||"").replace(/[^A-Za-z0-9ก-ฮ]/g,"").slice(0,16)}-${Math.floor(Math.random()*9000+1000)}`,
+      sku: `${typeCode}-${canonClean}${colorPart}`.toUpperCase(),
       color: item.color || null,
-      pack_size: item.pack_size || 1,
-      unit_name: item.unit_name || "unit",
+      pack_size: item.pack_size || (item.product_type === "scent_pack" ? 100 : 1),
+      unit_name: item.product_type === "device" ? "เครื่อง" : item.product_type === "scent_pack" ? "กล่อง" : (item.unit_name || "unit"),
       active: item.flag === "blocked" ? false : true,
       flag: item.flag || "ok",
     };
@@ -444,10 +478,11 @@ async function handleImportCommit(req, res) {
     }
 
     if (product && Number(item.counted_quantity || 0) !== 0) {
+      const packMul = product.product_type === "scent_pack" ? (Number(product.pack_size) || 100) : 1;
       const mv = {
         product_id: product.id,
         movement_type: "opening_balance",
-        quantity_delta: Number(item.counted_quantity),
+        quantity_delta: Number(item.counted_quantity) * packMul,
         reference_type: "initial_import",
         reference_id: importRef,
         reason: `Initial import opening balance`,
