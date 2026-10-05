@@ -653,7 +653,9 @@ async function handleSaleDirectDeduct(body) {
   if (!items.length) return { status: 400, body: { success: false, error: "items array is required" } };
 
   const refId = String(sourceOrderId);
-  const refType = "line_order";
+  const refType = String(body.reference_type || "line_order");
+  const allowedRefTypes = new Set(["line_order", "admin", "import"]);
+  if (!allowedRefTypes.has(refType)) return { status: 400, body: { success: false, error: "invalid reference_type" } };
   const existing = await supabase(
     `stock_ledger?select=*&reference_type=eq.${refType}&reference_id=eq.${encodeURIComponent(refId)}&movement_type=in.(sale,reservation,release,return)`,
     { method: "GET" }
@@ -674,7 +676,7 @@ async function handleSaleDirectDeduct(body) {
 
   const orderNumber = body.order_number || null;
   const lineMessageId = body.line_message_id || null;
-  const createdBy = "sync-order-api-direct";
+  const createdBy = body.created_by || (refType === "admin" ? "manual-sale-api" : "sync-order-api-direct");
   const failedItems = [];
   const movements = [];
   let totalMachinesDeducted = 0;
