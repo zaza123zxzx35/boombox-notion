@@ -185,9 +185,12 @@ async function callOrdersAPI(orderToken, host, payload) {
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(4000),
     });
-    const short = await res.text().then((t) => String(t).slice(0, 800)).catch(() => "");
+    const short = await res.text().then((t) => String(t).slice(0, 8000)).catch(() => "");
     let body = null;
     try { body = short ? JSON.parse(short) : null; } catch { body = { raw: short }; }
+    if (body && typeof body.raw === "string") {
+      try { const inner = JSON.parse(body.raw); if (inner && typeof inner === "object") body = inner; } catch {}
+    }
     const ok = res.ok || (body && body.success === true && body.duplicate === true);
     return { ok, status: res.status, body };
   } catch (err) {
