@@ -79,9 +79,13 @@ function env(name) {
 function isAuthorizedAdmin(req) {
   const bearer = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   const adminToken = String(req.headers["x-admin-token"] || "");
-  const expected = process.env.BACKOFFICE_ADMIN_TOKEN;
-  if (!expected) return false;
-  return (bearer && bearer === expected) || (adminToken && adminToken === expected);
+  const expectedListRaw = process.env.BACKOFFICE_ADMIN_TOKEN || process.env.BACKOFFICE_ADMIN_TOKENS || "";
+  if (!expectedListRaw) return false;
+  const expectedList = String(expectedListRaw).split(",").map(s => s.trim()).filter(Boolean);
+  if (expectedList.length === 0) return false;
+  const provided = bearer || adminToken || "";
+  if (!provided) return false;
+  return expectedList.some(tok => tok === provided);
 }
 
 async function supabase(path, options = {}) {
